@@ -291,6 +291,7 @@ export class LibraryIndexService {
       this.publishSnapshot(state, draft.snapshot);
       this.completeChanges(changes);
     } finally {
+      this.completeChanges(changes);
       state.reconciling = false;
     }
   }
@@ -419,7 +420,13 @@ export class LibraryIndexService {
     if (changes.fullRebuild) {
       this.metrics.staleBuildDiscards += 1;
       const coveredCompletions = [...changes.completions];
-      snapshot = await this.buildSnapshot(libraryID, state.epoch);
+      try {
+        snapshot = await this.buildSnapshot(libraryID, state.epoch);
+      } catch (error) {
+        // These completions were removed from pendingChanges before the build.
+        coveredCompletions.forEach((completion) => completion.resolve());
+        throw error;
+      }
       changes = this.takePendingChanges(state);
       coveredCompletions.forEach((completion) =>
         changes.completions.add(completion),
@@ -442,6 +449,7 @@ export class LibraryIndexService {
       }
     } catch (error) {
       state.snapshot = undefined;
+      this.completeChanges(changes);
       throw error;
     }
     const trailing = this.takePendingChanges(state);

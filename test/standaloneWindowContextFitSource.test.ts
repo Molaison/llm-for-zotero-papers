@@ -76,5 +76,9 @@ describe("standalone window context preview fitting", function () {
     assert.include(rule, "max-height: 420px;");
     assert.include(rule, "overflow-y: auto;");
     assert.notInclude(rule, "vh");
+    // The scroll container must not contain the absolutely positioned hover
+    // cards, or it clips the ones above its top edge.
+    assert.include(rule, "position: static;");
+    assert.include(rule, "container-type: normal;");
   });
 });

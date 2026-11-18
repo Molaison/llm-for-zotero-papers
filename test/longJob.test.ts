@@ -11,6 +11,7 @@ import {
   settledTargetCount,
   renderLongJobMessage,
   renderLongJobResume,
+  renderUnfinishedParts,
   type LongJobPage,
 } from "../src/agent/loop/longJob";
 import {
@@ -70,6 +71,53 @@ function read(
     ledger,
     { kind: "read", targets, noText, observationIds: [] },
     3,
+  ).checkpoint;
+}
+
+/** Read each paper and save a note on each, over `targets`. */
+function readAndNote(targets: string[]): ExecutionCheckpoint {
+  return declareOutcomes(
+    jobLedger(targets),
+    [
+      {
+        taskId: "note-all",
+        description: "Save a note on each paper",
+        effect: "mutation",
+        capability: "zotero.notes",
+        targets,
+        scope: true,
+      },
+    ],
+    3,
+  );
+}
+
+function noted(
+  ledger: ExecutionCheckpoint,
+  target: string,
+): ExecutionCheckpoint {
+  return applyOutcomeEvidence(
+    ledger,
+    {
+      kind: "receipt",
+      receipt: {
+        version: 2,
+        id: `note:${target}`,
+        proposalId: `note_create:${target}`,
+        proofDomain: "zotero_state",
+        capability: "zotero.notes",
+        operation: "note_create",
+        verification: "verified",
+        status: "applied",
+        requestedTargets: [target],
+        appliedTargets: [target],
+        alreadySatisfiedTargets: [],
+        rejectedTargets: [],
+        reasons: [],
+        verifiedFacts: [],
+      },
+    },
+    4,
   ).checkpoint;
 }
 
@@ -1388,54 +1436,124 @@ describe("long job", function () {
     });
   });
 
-  describe("a job resumed on continue", function () {
-    /** Read each paper and save a note on each, over `targets`. */
-    function readAndNote(targets: string[]): ExecutionCheckpoint {
-      return declareOutcomes(
-        jobLedger(targets),
-        [
-          {
-            taskId: "note-all",
-            description: "Save a note on each paper",
-            effect: "mutation",
-            capability: "zotero.notes",
-            targets,
-            scope: true,
-          },
-        ],
-        3,
+  describe("papers read whose notes are not written yet", function () {
+    // Their text is in the prompt already: what they still need of the room
+    // is a write, not another read.
+    const ORDINARY = 8;
+    const C = PAPER_TEXT_PRIOR_TOKENS;
+
+    /** A page of 9 papers, all read: 120k + 9 reads of 12k in a 240k budget. */
+    function readPage() {
+      const pager = pagerWith(C);
+      let ledger = readAndNote(items(50));
+      const page = plannedPage(pager, ledger, 120_000, 240_000, 1);
+      assert.lengthOf(page.targets, 9);
+      ledger = read(ledger, [...page.targets]);
+      const promptTokens = 120_000 + 9 * C;
+      assert.isNull(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens,
+          budgetTokens: 240_000,
+          requests: 2,
+          reads: page.targets,
+        }),
       );
+      return { pager, ledger, page, promptTokens };
     }
 
-    function noted(
-      ledger: ExecutionCheckpoint,
-      target: string,
-    ): ExecutionCheckpoint {
-      return applyOutcomeEvidence(
+    it("lets one step write a note on each paper of a page it has read", function () {
+      const { pager, ledger, promptTokens } = readPage();
+      assert.equal(pager.openPage(ledger)?.left.length, 9, "none settled yet");
+      assert.equal(
+        pager.stepLimit(
+          { checkpoint: ledger, promptTokens, budgetTokens: 240_000 },
+          ORDINARY,
+        ),
+        10,
+      );
+      // A restart drops their reads: they are priced as reads again.
+      pager.restarted({ checkpoint: ledger, promptTokens });
+      assert.equal(
+        pager.stepLimit(
+          { checkpoint: ledger, promptTokens, budgetTokens: 240_000 },
+          ORDINARY,
+        ),
+        ORDINARY,
+      );
+    });
+
+    it("keeps a page open while the papers it has left are read and wait only for their notes", function () {
+      const { pager, page, promptTokens, ledger: readLedger } = readPage();
+      let ledger = readLedger;
+      for (const target of page.targets.slice(0, 3))
+        ledger = noted(ledger, target);
+      assert.isNull(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens: promptTokens + 3 * 300,
+          budgetTokens: 240_000,
+          requests: 3,
+        }),
+      );
+      assert.equal(pager.openPage(ledger)?.left.length, 6);
+    });
+
+    it("does not page a job that fits one pass once its papers are read", function () {
+      const pager = pagerWith(4_000);
+      let ledger = readAndNote(items(20));
+      const budgetTokens = 110_000;
+      // 20 papers of 4k fit the room of 100k: one pass.
+      assert.isNull(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens: 10_000,
+          budgetTokens,
+          requests: 1,
+        }),
+      );
+      ledger = read(ledger, items(20));
+      const promptTokens = 10_000 + 20 * 4_000;
+      assert.isNull(
+        pager.check({
+          checkpoint: ledger,
+          promptTokens,
+          budgetTokens,
+          requests: 2,
+          reads: items(20),
+        }),
+        "the 20 notes need no new page",
+      );
+      assert.isFalse(pager.active);
+      assert.equal(
+        pager.stepLimit(
+          { checkpoint: ledger, promptTokens, budgetTokens },
+          ORDINARY,
+        ),
+        21,
+      );
+    });
+  });
+
+  describe("an answer given while parts are open", function () {
+    it("states each open part's progress", function () {
+      let ledger = read(readAndNote(items(3)), items(3));
+      ledger = noted(ledger, "item:1");
+      ledger = declareOutcomes(
         ledger,
-        {
-          kind: "receipt",
-          receipt: {
-            version: 2,
-            id: `note:${target}`,
-            proposalId: `note_create:${target}`,
-            proofDomain: "zotero_state",
-            capability: "zotero.notes",
-            operation: "note_create",
-            verification: "verified",
-            status: "applied",
-            requestedTargets: [target],
-            appliedTargets: [target],
-            alreadySatisfiedTargets: [],
-            rejectedTargets: [],
-            reasons: [],
-            verifiedFacts: [],
-          },
-        },
+        [{ taskId: "tag", description: "Tag it", effect: "mutation" }],
         4,
-      ).checkpoint;
-    }
+      );
+      const open = ledger.tasks.filter((task) => task.status === "pending");
+      assert.equal(
+        renderUnfinishedParts(open, OUTCOME_REASONS.noText),
+        "Not done before this answer: “Save a note on each paper” 1 of 3 done; “Tag it”.",
+      );
+      assert.equal(renderUnfinishedParts([], OUTCOME_REASONS.noText), "");
+    });
+  });
 
+  describe("a job resumed on continue", function () {
     it("states the job's progress and the papers it has left, in order, from the first not settled", function () {
       // Papers 1 and 2 are read and noted; 3 is read; 4 has no text.
       let ledger = read(readAndNote(items(6)), items(3), ["item:4"]);

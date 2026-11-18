@@ -5,9 +5,10 @@ import type { ProviderCapabilities, ProviderParams } from "../types";
  *
  * OpenRouter, relay/proxy services (e.g. right.codes), and any other
  * provider using OpenAI/Anthropic/Gemini-compatible endpoints that are
- * NOT hosted by a native first-party provider. Full-PDF mode is disabled
- * because compatible chat endpoints do not imply a compatible PDF/file
- * input contract.
+ * NOT hosted by a native first-party provider. PDF is off by default;
+ * registry.ts enables API-key Responses inline PDF only when the selected
+ * model declares inputs.pdf or the user selects PDF allowed. Other protocols do not
+ * imply a PDF/file input contract.
  */
 
 export function matches(params: ProviderParams): boolean {

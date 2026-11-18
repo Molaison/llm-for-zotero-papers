@@ -1,5 +1,5 @@
 import { assert } from "chai";
-import { resolveLiveAgentCredentials } from "../test-live-agent/liveAgentCredentials";
+import { resolveLiveAgentCredentials } from "../test-live/agent/liveAgentCredentials";
 
 describe("live workflow credential selection", function () {
   it("uses the selected run model without relying on a chrome global environment export", async function () {

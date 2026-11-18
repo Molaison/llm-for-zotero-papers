@@ -1,4 +1,5 @@
 import { assert } from "chai";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, beforeEach, describe, it } from "mocha";
 
 import {
@@ -7,7 +8,12 @@ import {
   type AssistantTurnDeps,
 } from "../src/modules/contextPanel/assistantTurn";
 import type { CodexNativeActivityTraceController } from "../src/modules/contextPanel/codexNativeTrace/controller";
-import { EMPTY_OUTPUT_LIMIT_MESSAGE } from "../src/modules/contextPanel/directChatCompletion";
+import {
+  EMPTY_OUTPUT_LIMIT_MESSAGE,
+  callDirectChatTurnWithRecovery,
+} from "../src/modules/contextPanel/directChatCompletion";
+import { toStoredAssistantRow } from "../src/modules/contextPanel/storedAssistantRow";
+import { appendMessage, loadConversation } from "../src/utils/chatStore";
 import {
   setAbortController,
   setCancelledRequestId,
@@ -136,7 +142,7 @@ function harness(overrides: Partial<AssistantTurnDeps> = {}) {
 }
 
 /** Long enough to cross the coalescer's target, ending at a block boundary. */
-const PARAGRAPH = `${"word ".repeat(40)}\n\n`;
+const PARAGRAPH = `${"word ".repeat(60)}\n\n`;
 const COMPLETE: ModelTurnOutcome = {
   text: "",
   completion: { status: "complete" },
@@ -686,4 +692,145 @@ describe("finalizeCancelledAssistantMessage", function () {
     assert.isNull(message.webchatCompletionReason);
     assert.isNumber(message.timestamp);
   });
+});
+
+// Local transport -> ordinary direct-chat -> UI owner -> real message SQL ->
+// reload. Only fetch, host UI callbacks and registry lookups are substituted;
+// the message INSERT/SELECT runs against disposable native SQLite, not Zotero.
+describe("ordinary Responses provider failure persistence", function () {
+  for (const partial of [false, true]) {
+    it(`stores the captured Gamma timeout ${partial ? "as an interrupted partial answer" : "as a visible error, not empty completion"}`, async function () {
+      const globals = globalThis as unknown as Record<string, unknown>;
+      const saved = { Zotero: globals.Zotero, ztoolkit: globals.ztoolkit };
+      const db = new DatabaseSync(":memory:");
+      const { turn, message, log } = harness();
+      let requests = 0;
+      let failed = false;
+      try {
+        globals.Zotero = {
+          Prefs: { get: () => undefined },
+          DB: {
+            queryAsync: async (sql: string, params: SQLInputValue[] = []) => {
+              // Retain exactly the product's INSERT columns and values. Other
+              // catalog/registry queries are empty in this isolated fixture.
+              if (
+                sql.includes("legacy_conversation_key = ?") &&
+                sql.includes("profile_signature AS profileSignature")
+              )
+                return [
+                  {
+                    instanceID: "fixture-instance",
+                    conversationID: "fixture-conversation",
+                    conversationKey: 42,
+                    system: "upstream",
+                    kind: "paper",
+                    libraryID: 1,
+                    paperItemID: 42,
+                    valid: 1,
+                  },
+                ];
+              const insert = sql.match(
+                /INSERT INTO llm_for_zotero_chat_messages\s*\(([^)]+)\)/,
+              );
+              if (insert) {
+                db.exec(
+                  `CREATE TABLE IF NOT EXISTS llm_for_zotero_chat_messages (id INTEGER PRIMARY KEY, ${insert[1]})`,
+                );
+                db.prepare(sql).run(...params);
+              }
+              if (sql.includes("webchat_run_state AS"))
+                return db.prepare(sql).all(...params);
+              return [];
+            },
+            executeTransaction: async (callback: () => Promise<unknown>) =>
+              callback(),
+          },
+        };
+        globals.ztoolkit = {
+          getGlobal: () => async (url: string, init: RequestInit) => {
+            requests++;
+            assert.match(url, /\/responses$/);
+            assert.isTrue(JSON.parse(String(init.body)).stream);
+            return new Response(
+              (partial
+                ? 'data: {"type":"response.output_text.delta","delta":"Partial answer"}\n\n'
+                : "") +
+                ': keep-alive\n\nevent: response.failed\ndata: {"type":"response.failed","response":{"id":"resp_proxy_e4958cc99067445c9c37bd1523509d32","status":"failed","error":{"message":"Upstream request timed out.","type":"server_error","code":"request_timeout"}}}\n\ndata: [DONE]\n\n',
+              { status: 200 },
+            );
+          },
+        };
+        turn.start();
+        try {
+          const outcome = await callDirectChatTurnWithRecovery({
+            request: {
+              apiBase: "https://fixture.invalid/v1",
+              apiKey: "fixture-only",
+              model: "gpt-6.1-sol",
+              providerProtocol: "responses_api",
+              prompt: "Explain the paper.",
+            },
+            onDelta: turn.push,
+          });
+          message.text =
+            outcome.text || message.text || turn.beginCompletion(outcome);
+          await turn.recordCompletion(outcome, { conversationKey: KEY });
+          turn.presentCompletion({ compactMarker: false });
+        } catch (error) {
+          failed = true;
+          const interruption = turn.readInterruption(error, {
+            codexLabel: "unused",
+            imageCount: 0,
+          });
+          message.text = interruption.text;
+          message.interrupted = interruption.interrupted;
+          message.streaming = false;
+          log.push(`status:error:${interruption.errorMessage}`);
+        }
+        await appendMessage(42, {
+          ...toStoredAssistantRow(message, 3),
+          role: "assistant",
+          completionStatus: message.completionStatus,
+          completionReason: message.completionReason,
+        });
+        const [loaded] = await loadConversation(42, 10);
+        const [row] = db
+          .prepare("SELECT * FROM llm_for_zotero_chat_messages")
+          .all();
+        assert.isOk(loaded, "message reload must find the stored row");
+        assert.equal(requests, 1, "no recovery/retry of a failed request");
+        assert.equal(
+          loaded.text,
+          message.text,
+          "UI owner and reloaded storage agree",
+        );
+        assert.notInclude(
+          loaded.text,
+          "The model completed without producing visible text.",
+        );
+        assert.isTrue(failed, "explicit failure must take the error path");
+        assert.isFalse(message.streaming);
+        assert.isNull(row.completion_status);
+        if (partial) {
+          assert.equal(loaded.text, "Partial answer");
+          assert.isTrue(loaded.interrupted);
+          assert.equal(row.interrupted, 1);
+        } else {
+          for (const detail of [
+            "Upstream request timed out.",
+            "request_timeout",
+            "server_error",
+          ])
+            assert.include(loaded.text, detail);
+          assert.match(loaded.text, /^Error: /);
+          assert.isNotOk(loaded.interrupted);
+        }
+        assert.include(log.join("\n"), "status:error:Responses stream error:");
+      } finally {
+        turn.end();
+        db.close();
+        Object.assign(globals, saved);
+      }
+    });
+  }
 });

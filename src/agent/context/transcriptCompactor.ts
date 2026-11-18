@@ -1,3 +1,4 @@
+import { retainToolRejectionFeedback } from "./toolRejectionFeedback";
 import { fnv1a32Raw } from "../../utils/fnv1a";
 import type {
   AgentModelMessage,
@@ -6,13 +7,33 @@ import type {
 } from "../types";
 import {
   estimateContextMessagesTokens,
+  estimateTextTokens,
   sliceTextToTokenBudget,
 } from "../../utils/modelInputCap";
+import { SELECTED_TEXT_QUESTIONS_INSTRUCTION } from "../../services/context/selectedTextAnchorFormatting";
 import type { AgentContextBudgetState } from "./budgetPolicy";
+import {
+  formatPastChatPointerLine,
+  isPastChatMessageText,
+  readPastChatMessageSections,
+} from "../../services/pastConversations/pastConversationText";
 import {
   createAgentToolResultHandleRecord,
   type AgentToolResultHandleRecord,
 } from "../store/toolResultHandles";
+
+/**
+ * The chip questions of a user message whose request is only the
+ * questions-instruction: the questions themselves sit under each selection.
+ */
+function readSelectedTextQuestions(text: string): string {
+  return Array.from(
+    text.matchAll(/\nQuestion about this text:\n([\s\S]*?)(?=\n\n|$)/g),
+    (match) => match[1].trim(),
+  )
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 export type AgentTranscriptCompactionResult = {
   compacted: boolean;
@@ -23,6 +44,209 @@ export type AgentTranscriptCompactionResult = {
 };
 
 const SEMANTIC_CHECKPOINT_PREFIX = "Agent semantic continuation checkpoint:";
+const COMPACT_CHECKPOINT_PREFIX = "Agent transcript compact checkpoint:";
+const TASK_CONTEXT_PREFIX = "User task context v1: ";
+
+export class AgentTaskContextBudgetError extends Error {
+  constructor(
+    message: string,
+    readonly details: {
+      mode: "compact" | "continuation";
+      summaryTokens: number;
+      maxTokens: number;
+      headTokens: number;
+      coreTokens: number;
+      entryCount: number;
+    },
+  ) {
+    super(`${message} ${JSON.stringify(details)}`);
+    this.name = "AgentTaskContextBudgetError";
+  }
+}
+
+export type UserTaskEntry = {
+  text?: string;
+  messageId?: string;
+  executionId?: string;
+  handle?: string;
+  /** Older checkpoints never guaranteed a complete user request. */
+  incomplete?: true;
+};
+
+function isTaskCheckpoint(message: AgentModelMessage): boolean {
+  const content = message.content;
+  return (
+    message.role === "user" &&
+    !message.retainedTool &&
+    !message.transient &&
+    typeof content === "string" &&
+    [
+      SEMANTIC_CHECKPOINT_PREFIX,
+      COMPACT_CHECKPOINT_PREFIX,
+      "Legacy conversation summary (earlier exact text may be unavailable):",
+    ].some((prefix) => content.startsWith(prefix))
+  );
+}
+
+function legacyCheckpointGoal(text: string): string | undefined {
+  return (
+    text
+      .match(
+        /Latest root user goal:\s*([\s\S]*?)(?=\s+(?:Recent user goals and runtime requirements:|Recent visible assistant state:|Earlier tools used:|Stored compacted tool-result handles:)|$)/,
+      )?.[1]
+      ?.trim() || undefined
+  );
+}
+
+function checkpointTaskEntries(message: AgentModelMessage): UserTaskEntry[] {
+  if (!isTaskCheckpoint(message)) return [];
+  const text = stringifyContent(message.content);
+  const line = text
+    .split("\n")
+    .find((line) => line.startsWith(TASK_CONTEXT_PREFIX));
+  if (line) {
+    try {
+      const data = JSON.parse(line.slice(TASK_CONTEXT_PREFIX.length));
+      if (data.source === "user" && Array.isArray(data.entries)) {
+        return data.entries.flatMap((entry: UserTaskEntry) => {
+          if (!entry || typeof entry !== "object") return [];
+          const text = typeof entry.text === "string" ? entry.text : undefined;
+          const messageId =
+            typeof entry.messageId === "string" ? entry.messageId : undefined;
+          const executionId =
+            typeof entry.executionId === "string" && entry.executionId.trim()
+              ? entry.executionId
+              : undefined;
+          const handle =
+            typeof entry.handle === "string" &&
+            /^trh_[a-z0-9]+$/i.test(entry.handle)
+              ? entry.handle
+              : undefined;
+          return text || messageId || handle
+            ? [
+                {
+                  ...(text ? { text } : {}),
+                  ...(messageId ? { messageId } : {}),
+                  ...(executionId ? { executionId } : {}),
+                  ...(handle ? { handle } : {}),
+                  ...(entry.incomplete === true
+                    ? { incomplete: true as const }
+                    : {}),
+                },
+              ]
+            : [];
+        });
+      }
+    } catch {
+      // A damaged summary is not a complete task or a new instruction.
+    }
+    return [];
+  }
+  const goal = legacyCheckpointGoal(text);
+  return goal ? [{ text: goal, incomplete: true }] : [];
+}
+
+function explicitUserGoal(text: string): string | undefined {
+  const goal = text.match(/^User request:\s*([\s\S]*)$/i)?.[1]?.trim();
+  if (goal) return goal;
+  // Selected-text chips are the other host-authored user-request encoding.
+  if (
+    text.startsWith("Selected text ") &&
+    text.endsWith(`User request:\n${SELECTED_TEXT_QUESTIONS_INSTRUCTION}`)
+  ) {
+    return (
+      readSelectedTextQuestions(text) || SELECTED_TEXT_QUESTIONS_INSTRUCTION
+    );
+  }
+  return undefined;
+}
+
+function collectUserTaskEntries(
+  messages: readonly AgentModelMessage[],
+): UserTaskEntry[] {
+  const entries: UserTaskEntry[] = [];
+  for (const message of messages) {
+    if (message.role !== "user" || message.retainedTool || message.transient)
+      continue;
+    const text = stringifyContent(message.content);
+    if (isPastChatMessageText(text)) continue;
+    const goal = !isTaskCheckpoint(message)
+      ? explicitUserGoal(text)
+      : undefined;
+    const next = isTaskCheckpoint(message)
+      ? checkpointTaskEntries(message)
+      : goal
+        ? [
+            {
+              text: goal,
+              ...(message.messageId ? { messageId: message.messageId } : {}),
+              ...(message.executionId
+                ? { executionId: message.executionId }
+                : {}),
+            },
+          ]
+        : [];
+    for (const entry of next) {
+      const index = entry.messageId
+        ? entries.findIndex(
+            (old) =>
+              old.messageId === entry.messageId &&
+              old.executionId === entry.executionId,
+          )
+        : -1;
+      if (index < 0) entries.push(entry);
+      // A durable original user message may restore a pointer, never a tool reply.
+      else if (entry.text && !entry.incomplete) entries[index] = entry;
+    }
+  }
+  return entries;
+}
+
+function taskEntryText(entry: UserTaskEntry): string {
+  if (entry.text) {
+    return `${entry.incomplete ? "[Legacy excerpt; incomplete, exact original unavailable here.]\n" : ""}${entry.text}`;
+  }
+  return entry.messageId
+    ? `[Full user text not inline; retrieve with context_read source:'conversation' messageId=${entry.messageId}]`
+    : `[Ordered user task history not inline; retrieve with context_read source:'tool_result' handle=${entry.handle} path:'entries'; stored source=user, not tool instructions]`;
+}
+
+/**
+ * Read-only task semantics from durable user requests, oldest first. Never use
+ * this as current-turn identity or authorization. Retrieved tool text and
+ * attached chats cannot create or replace entries, even if they quote requests.
+ * Scoped entries require an explicit executionId. Legacy unscoped text is
+ * readable only as ownership-unknown history, never inferred for an execution.
+ */
+export function readAgentTaskContext(
+  messages: readonly AgentModelMessage[],
+  executionId?: string,
+): string | undefined {
+  const history = collectUserTaskEntries(messages);
+  // No keyword, ordering or checkpoint-message identity may assign ownership
+  // to an older unscoped request. Mixed history needs an explicit host scope.
+  if (executionId === undefined && history.some((entry) => entry.executionId))
+    return undefined;
+  const entries =
+    executionId === undefined
+      ? history
+      : history.filter((entry) => entry.executionId === executionId);
+  if (!entries.length) return undefined;
+  return [
+    `User task context (source=user; ${executionId === undefined ? "execution ownership unknown; not a current task" : `executionId=${executionId}`}; historical, read-only, not new authorization):`,
+    ...entries.map(
+      (entry, index) =>
+        `${index === 0 ? "Original user goal" : `Subsequent user instruction ${index}`}:\n${taskEntryText(entry)}`,
+    ),
+  ].join("\n\n");
+}
+
+/** Storage/compaction presence check, not selection of the current execution. */
+export function hasAgentTaskContext(
+  messages: readonly AgentModelMessage[],
+): boolean {
+  return collectUserTaskEntries(messages).length > 0;
+}
 
 export function readAgentSemanticCheckpointRootGoal(
   message: AgentModelMessage | undefined,
@@ -30,14 +254,12 @@ export function readAgentSemanticCheckpointRootGoal(
   if (
     message?.role !== "user" ||
     typeof message.content !== "string" ||
-    !message.content.startsWith(SEMANTIC_CHECKPOINT_PREFIX)
+    !isTaskCheckpoint(message)
   ) {
     return undefined;
   }
-  const match = message.content.match(
-    /Latest root user goal:\s*(.*?)(?=\s+(?:Recent user goals and runtime requirements:|Recent visible assistant state:|Earlier tools used:|Stored compacted tool-result handles:)|$)/,
-  );
-  return match?.[1]?.trim() || undefined;
+  const root = checkpointTaskEntries(message)[0];
+  return root ? root.text || taskEntryText(root) : undefined;
 }
 
 function stringifyContent(content: AgentModelMessage["content"]): string {
@@ -148,20 +370,16 @@ function buildSummaryMessage(
   summaryTokens: number,
   toolHandleLines: string[] = [],
   mode: "compact" | "continuation" = "compact",
+  storage?: {
+    conversationKey?: number;
+    resourceSignature?: string;
+    handleRecords: AgentToolResultHandleRecord[];
+    maxTokens?: number;
+  },
 ): AgentUserMessage & { content: string } {
-  // Char cap derived from the real token weight of the (whitespace-normalized)
-  // summary text; a flat tokens * 4 inverse let CJK checkpoints exceed their
-  // token budget 2x. The 600-char floor keeps tiny budgets minimally useful.
-  const buildBudgetChars = (candidate: string): number =>
-    Math.max(
-      600,
-      sliceTextToTokenBudget(
-        candidate.replace(/\s+/g, " ").trim(),
-        summaryTokens,
-      ).length,
-    );
   const userLines: string[] = [];
-  const rootUserGoals: string[] = [];
+  const pastChatLines: string[] = [];
+  let taskEntries = collectUserTaskEntries(messages);
   const assistantLines: string[] = [];
   const preservedToolHandleIds = new Set<string>();
   const toolCounts = new Map<string, number>();
@@ -179,18 +397,22 @@ function buildSummaryMessage(
         toolCounts.set(name, (toolCounts.get(name) || 0) + 1);
         continue;
       }
-      const checkpointGoal = readAgentSemanticCheckpointRootGoal(message);
-      if (checkpointGoal) {
-        rootUserGoals.push(checkpointGoal);
+      // A past chat the user attached is reference data, not a goal: the
+      // summary keeps one line per chat that says how to open it again.
+      if (isPastChatMessageText(text)) {
+        for (const section of readPastChatMessageSections(text)) {
+          const line = `- ${formatPastChatPointerLine(section)}`;
+          if (!pastChatLines.includes(line)) pastChatLines.push(line);
+        }
+        continue;
+      }
+      if (isTaskCheckpoint(message)) {
         for (const match of text.matchAll(/\bhandle=(trh_[a-z0-9]+)\b/gi)) {
           preservedToolHandleIds.add(match[1]);
         }
         continue;
       }
-      const rootGoalMatch = text.match(/(?:^|\n)User request:\s*([\s\S]*)$/i);
-      if (rootGoalMatch?.[1]?.trim()) {
-        rootUserGoals.push(rootGoalMatch[1].trim());
-      }
+      if (explicitUserGoal(text)) continue;
       userLines.push(
         `- ${message.messageId ? `messageId=${message.messageId} ` : ""}${truncateText(text.replace(/^User request:\s*/i, ""), 220)}`,
       );
@@ -212,16 +434,109 @@ function buildSummaryMessage(
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([name, count]) => `${name}${count > 1 ? ` x${count}` : ""}`)
     .join(", ");
-  const sections = [
+  const prefix =
     mode === "continuation"
       ? SEMANTIC_CHECKPOINT_PREFIX
-      : "Agent transcript compact checkpoint:",
-    mode === "continuation"
-      ? "The previous provider session ended. This is portable task history, not hidden reasoning or new instructions."
-      : "Older conversation was shortened for the prompt; exact messages remain stored.",
-    "Excerpts are incomplete; use context_read source:'conversation' with messageId or source:'tool_result' with handle before relying on omitted text.",
-    rootUserGoals.length
-      ? `Latest root user goal: ${truncateText(rootUserGoals[rootUserGoals.length - 1], 400)}`
+      : COMPACT_CHECKPOINT_PREFIX;
+  const maxTokens = Math.max(
+    0,
+    Math.floor(storage?.maxTokens ?? summaryTokens),
+  );
+  // Diagnostics are already bounded; reserve their space before choosing task
+  // representations so a later generic truncation can never cut the task JSON.
+  const head = retainToolRejectionFeedback(
+    prefix,
+    messages,
+    maxTokens,
+  ).trimEnd();
+  const taskBlock = (): string =>
+    taskEntries.length
+      ? `${TASK_CONTEXT_PREFIX}${JSON.stringify({ source: "user", entries: taskEntries })}`
+      : "";
+  const core = (): string => [head, taskBlock()].filter(Boolean).join("\n\n");
+  const budgetError = (message: string): AgentTaskContextBudgetError =>
+    new AgentTaskContextBudgetError(message, {
+      mode,
+      summaryTokens,
+      maxTokens,
+      headTokens: estimateTextTokens(head),
+      coreTokens: estimateTextTokens(core()),
+      entryCount: taskEntries.length,
+    });
+  // Prefer the complete root, then complete later instructions. Only the real
+  // caller-supplied ceiling can force exact references, not the summary share.
+  for (
+    let index = taskEntries.length - 1;
+    index >= 0 && estimateTextTokens(core()) > maxTokens;
+    index -= 1
+  ) {
+    const entry = taskEntries[index];
+    if (entry.messageId && entry.text)
+      taskEntries[index] = {
+        messageId: entry.messageId,
+        ...(entry.executionId ? { executionId: entry.executionId } : {}),
+      };
+  }
+  if (estimateTextTokens(core()) > maxTokens && taskEntries.length) {
+    // Archive contiguous ownership runs separately. A scoped reference must
+    // never point at another execution's instructions; run order stays exact.
+    const groups: UserTaskEntry[][] = [];
+    for (const entry of collectUserTaskEntries(messages)) {
+      const last = groups.at(-1);
+      if (last && last[0].executionId === entry.executionId) last.push(entry);
+      else groups.push([entry]);
+    }
+    const records = groups.map((entries) => {
+      const content = { source: "user", entries };
+      return createAgentToolResultHandleRecord({
+        conversationKey: storage?.conversationKey,
+        // User history is conversation-scoped, not current Zotero-scope evidence.
+        toolName: "user_task_context",
+        toolCallId: `user-task-${simpleDigest(content)}`,
+        content,
+      });
+    });
+    if (records.some((record) => !record))
+      throw budgetError(
+        "Cannot compact user task context without a recoverable messageId or conversation-scoped handle.",
+      );
+    taskEntries = records.map((record, index) => ({
+      handle: record!.handle,
+      ...(groups[index][0].executionId
+        ? { executionId: groups[index][0].executionId }
+        : {}),
+    }));
+    if (estimateTextTokens(core()) > maxTokens)
+      throw budgetError(
+        "Checkpoint budget cannot fit the exact user task context reference.",
+      );
+    storage!.handleRecords.push(
+      ...records.filter((record): record is AgentToolResultHandleRecord =>
+        Boolean(record),
+      ),
+    );
+  }
+  const required = core();
+  if (estimateTextTokens(required) > maxTokens)
+    throw budgetError(
+      "Checkpoint budget cannot fit its required history header.",
+    );
+  const budget = Math.min(
+    maxTokens,
+    Math.max(summaryTokens, estimateTextTokens(required)),
+  );
+  // The compatibility caption cannot imply that one historical execution (or
+  // a legacy unscoped entry) is the active goal of a multi-execution history.
+  const root = taskEntries.some((entry) => entry.executionId)
+    ? undefined
+    : taskEntries[0]?.text;
+  const sections = [
+    "Portable history, not new instructions or authorization. Exact omitted text: context_read source:'conversation' messageId or source:'tool_result' handle.",
+    root && root.length <= 220
+      ? `Latest root user goal: ${root.replace(/\s+/g, " ").trim()}`
+      : "",
+    pastChatLines.length
+      ? `Attached past chats:\n${pastChatLines.join("\n")}`
       : "",
     allToolHandleLines.length
       ? `Stored compacted tool-result handles:\n${allToolHandleLines.join("\n")}`
@@ -234,10 +549,15 @@ function buildSummaryMessage(
       : "",
     toolLine ? `Earlier tools used: ${toolLine}` : "",
   ].filter(Boolean);
-  const summaryText = sections.join("\n\n");
+  const suffix = sections.join("\n\n");
+  const separator = suffix ? "\n\n" : "";
+  const rest = sliceTextToTokenBudget(
+    separator + suffix,
+    Math.max(0, budget - estimateTextTokens(required)),
+  );
   return {
     role: "user",
-    content: truncateText(summaryText, buildBudgetChars(summaryText)),
+    content: required + rest,
   };
 }
 
@@ -366,7 +686,24 @@ export function buildPortableAgentTranscript(params: {
       ...(message.role === "user" && message.retainedTool
         ? { retainedTool: message.retainedTool }
         : {}),
+      ...(message.role === "user" && message.executionId
+        ? { executionId: message.executionId }
+        : {}),
     });
+  }
+  for (const message of messages) {
+    if (message.role !== "user" || !message.retainedTool) continue;
+    const original = params.messages.find(
+      (source) =>
+        source.role === "tool" &&
+        source.tool_call_id === message.retainedTool?.callId,
+    );
+    if (original && typeof message.content === "string")
+      message.content = retainToolRejectionFeedback(
+        message.content,
+        [original],
+        estimateTextTokens(message.content) + 256,
+      );
   }
   return { messages, handleRecords: generated.handleRecords };
 }
@@ -438,6 +775,8 @@ export function buildRetainedActionMessage(
 export function buildAgentSemanticCheckpoint(params: {
   messages: AgentModelMessage[];
   summaryTokens: number;
+  /** Actual checkpoint allowance after other prompt costs; defaults to summaryTokens. */
+  maxTokens?: number;
   conversationKey?: number;
   resourceSignature?: string;
   preservedHandleRecords?: readonly AgentToolResultHandleRecord[];
@@ -474,6 +813,7 @@ export function buildAgentSemanticCheckpoint(params: {
       params.summaryTokens,
       toolHandleLines,
       "continuation",
+      { ...params, handleRecords },
     ),
     handleRecords,
   };
@@ -515,9 +855,17 @@ function buildDroppedToolHandleRecords(params: {
 export function compactAgentTranscript(params: {
   messages: AgentModelMessage[];
   budget: AgentContextBudgetState;
+  /** Actual checkpoint allowance after other prompt costs; defaults to summaryTokens. */
+  maxTokens?: number;
   force?: boolean;
   conversationKey?: number;
   resourceSignature?: string;
+  /**
+   * A message that must stay in the recent tail with everything after it:
+   * the past-chat message the current turn attached, which the model has
+   * not seen yet and which no summary could stand in for.
+   */
+  keepInTail?: AgentModelMessage;
 }): AgentTranscriptCompactionResult {
   const messages = durableTranscriptMessages(params.messages);
   if (messages.length <= params.budget.policy.minRecentMessages + 1) {
@@ -528,13 +876,18 @@ export function compactAgentTranscript(params: {
       handleRecords: [],
     };
   }
-  const tailStart = alignTailStartToProviderMessageBoundary(
+  const pinnedIndex = params.keepInTail
+    ? messages.indexOf(params.keepInTail)
+    : -1;
+  const budgetTailStart = alignTailStartToProviderMessageBoundary(
     messages,
     Math.max(
       findTailStart(messages, params.budget.recentTailTokens),
       Math.max(0, messages.length - params.budget.policy.minRecentMessages),
     ),
   );
+  const tailStart =
+    pinnedIndex >= 0 ? Math.min(budgetTailStart, pinnedIndex) : budgetTailStart;
   const older = messages.slice(0, tailStart);
   const tail = messages.slice(tailStart);
   if (!older.length) {
@@ -555,6 +908,8 @@ export function compactAgentTranscript(params: {
     older,
     params.budget.summaryTokens,
     toolHandleLines,
+    "compact",
+    { ...params, handleRecords },
   );
   const compactedMessages = [summaryMessage, ...tail];
   if (

@@ -23,6 +23,12 @@ export function createNativeLifecycleTestProcess(params: {
   onServerResponse?: (message: Record<string, any>) => void;
   onTurnBeforeResponse?: boolean;
   onMcpReload?: () => Promise<void>;
+  /** Runs when thread/resume arrives; a returned id replaces the resumed thread. */
+  onResume?: (threadId: string) => string | void;
+  /** Rejects thread/resume with an ordinary provider error. */
+  resumeError?: string;
+  /** Rejects skills/extraRoots/set as an older app-server would. */
+  extraRootsSetUnsupported?: boolean;
 }): CodexAppServerProcess {
   let turnNumber = 0;
   const threadIds = [...params.newThreadIds];
@@ -93,6 +99,32 @@ export function createNativeLifecycleTestProcess(params: {
           );
           return;
         }
+        if (request.method === "skills/extraRoots/set") {
+          setTimeout(
+            () =>
+              handleMessage(
+                params.extraRootsSetUnsupported
+                  ? {
+                      id: request.id,
+                      error: { code: -32601, message: "Method not found" },
+                    }
+                  : { id: request.id, result: {} },
+              ),
+            0,
+          );
+          return;
+        }
+        if (request.method === "thread/fork") {
+          setTimeout(
+            () =>
+              handleMessage({
+                id: request.id,
+                result: { thread: { id: "thread-forked" } },
+              }),
+            0,
+          );
+          return;
+        }
         if (request.method === "configRequirements/read") {
           setTimeout(() => handleMessage({ id: request.id, result: {} }), 0);
           return;
@@ -144,13 +176,26 @@ export function createNativeLifecycleTestProcess(params: {
           return;
         }
         if (request.method === "thread/resume") {
+          if (params.resumeError) {
+            setTimeout(
+              () =>
+                handleMessage({
+                  id: request.id,
+                  error: { code: -32000, message: params.resumeError },
+                }),
+              0,
+            );
+            return;
+          }
+          const resumedThreadId =
+            params.onResume?.(requestParams.threadId) || requestParams.threadId;
           const effective = params.resumeEffectiveSettings || requestParams;
           setTimeout(
             () =>
               handleMessage({
                 id: request.id,
                 result: {
-                  thread: { id: requestParams.threadId },
+                  thread: { id: resumedThreadId },
                   activePermissionProfile: effective.permissions
                     ? { id: effective.permissions }
                     : null,

@@ -2,6 +2,7 @@ import { createElement } from "../../../../utils/domHelpers";
 import { t } from "../../../../utils/i18n";
 import {
   addZoteroItemsAsContext,
+  batchReferenceAttachmentContexts,
   isTagContextSelected,
   removeReferenceAttachmentContext,
   removeReferenceGroupContexts,
@@ -79,6 +80,11 @@ import {
 type StatusLevel = ContextSelectionStatusLevel;
 type ActiveSlashToken = PaperSearchSlashToken;
 type PickerAttachmentKind = "pdf" | "note" | "text" | "figure" | "other";
+// Sidebar panes keep their scroll position across full re-renders.
+const PAPER_PICKER_SIDEBAR_SCROLL_CLASSES = [
+  "llm-paper-picker-folder-pane",
+  "llm-paper-picker-tag-cloud",
+] as const;
 type PaperPickerRenderOptions = {
   preserveReferenceScroll?: boolean;
   skipActiveScroll?: boolean;
@@ -730,6 +736,57 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
     }
     refreshPaperPickerAfterContextSelection(options);
     return true;
+  };
+
+  const getCurrentResultTargets = (
+    groups: readonly PaperSearchGroupCandidate[],
+  ) => {
+    const seen = new Set<number>();
+    const selectedNotes = getSelectedNoteContextItemIds();
+    return groups.flatMap((group) =>
+      group.attachments.flatMap((attachment) => {
+        if (seen.has(attachment.contextItemId)) return [];
+        seen.add(attachment.contextItemId);
+        return [
+          {
+            group,
+            attachment,
+            kind: resolvePickerAttachmentKind(attachment),
+            selected: isReferenceSelectorSelected(
+              getPaperPickerAttachmentSelectionState(
+                group,
+                attachment,
+                selectedNotes,
+              ),
+            ),
+          },
+        ];
+      }),
+    );
+  };
+
+  const applyCurrentResultBatch = (action: "select" | "clear") => {
+    const viewModel = buildReferenceSelectorViewModel(referenceSelectorState);
+    // Search rows use state.groups, while browse rows use the filtered view.
+    const groups =
+      referenceSelectorState.mode === "search"
+        ? referenceSelectorState.groups
+        : viewModel.visibleGroups;
+    const result = batchReferenceAttachmentContexts({
+      deps: getContextSelectionActionDeps(),
+      targets: getCurrentResultTargets(groups),
+      action,
+      log: deps.log,
+    });
+    applyContextSelectionResult(result);
+    // Selection does not own the query lifecycle. Keep both the debounce and
+    // in-flight search alive so a newer query can replace these visible rows.
+    const scrollTop = paperPicker?.scrollTop ?? 0;
+    renderPaperPicker({
+      preserveReferenceScroll: true,
+      skipActiveScroll: true,
+    });
+    if (paperPicker) paperPicker.scrollTop = scrollTop;
   };
 
   const selectCollectionFromPickerUnified = (collectionId: number): boolean => {
@@ -1699,6 +1756,11 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
     const preservedReferenceScrollTop = options.preserveReferenceScroll
       ? getRenderedPaperPickerReferenceRowHost()?.scrollTop
       : undefined;
+    const previousRoot = paperPickerList.children[0] as HTMLElement | undefined;
+    const preservedSidebarScrollTops = PAPER_PICKER_SIDEBAR_SCROLL_CLASSES.map(
+      (className) =>
+        findPaperPickerDescendantByClass(previousRoot, className)?.scrollTop,
+    );
     paperPickerList.innerHTML = "";
     const item = deps.getItem();
     const selectedNoteContextItemIds = item
@@ -1720,11 +1782,59 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
           textContent: String(viewModel.visibleGroups.length),
         }),
       );
+      if (!isPaperPickerPanelCollapsed("references")) {
+        header.classList.add("llm-paper-picker-item-header-bulk");
+        header.appendChild(bulkBar);
+      }
       attachPaperPickerPanelHeaderToggle(header, "references");
       return header;
     };
 
     const rowHost = createElement(ownerDoc, "div", "llm-paper-picker-row-host");
+    const currentGroups =
+      referenceSelectorState.mode === "search"
+        ? referenceSelectorState.groups
+        : viewModel.visibleGroups;
+    const targets = getCurrentResultTargets(currentGroups);
+    const selectedCount = targets.filter((target) => target.selected).length;
+    const bulkBar = createElement(ownerDoc, "div", "llm-paper-picker-bulk-bar");
+    const count = createElement(
+      ownerDoc,
+      "span",
+      "llm-paper-picker-bulk-count",
+      {
+        textContent: t("{selected}/{total} references selected")
+          .replace("{selected}", String(selectedCount))
+          .replace("{total}", String(targets.length)),
+      },
+    );
+    count.setAttribute("aria-live", "polite");
+    bulkBar.appendChild(count);
+    for (const [action, label] of [
+      ["select", "Select all current results"],
+      ["clear", "Clear current result selections"],
+    ] as const) {
+      const button = createElement(
+        ownerDoc,
+        "button",
+        "llm-paper-picker-bulk-action",
+        {
+          textContent: t(label),
+        },
+      );
+      button.type = "button";
+      button.disabled = !item || targets.length === 0;
+      button.addEventListener("mousedown", (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      button.addEventListener("click", (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        applyCurrentResultBatch(action);
+      });
+      bulkBar.appendChild(button);
+    }
     const renderedOptions: HTMLElement[] = [];
     const referencesCollapsed =
       referenceSelectorState.mode === "browse" &&
@@ -1766,7 +1876,7 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
         "div",
         "llm-paper-picker-main llm-paper-picker-main-full",
       );
-      main.append(rowHost);
+      main.append(rowHost, bulkBar);
       paperPickerList.appendChild(main);
     }
 
@@ -2124,6 +2234,12 @@ export function createPaperPickerController(deps: PaperPickerControllerDeps): {
     ) {
       rowHost.scrollTop = preservedReferenceScrollTop;
     }
+    const nextRoot = paperPickerList.children[0] as HTMLElement | undefined;
+    PAPER_PICKER_SIDEBAR_SCROLL_CLASSES.forEach((className, index) => {
+      const scrollTop = preservedSidebarScrollTops[index];
+      const pane = findPaperPickerDescendantByClass(nextRoot, className);
+      if (pane && typeof scrollTop === "number") pane.scrollTop = scrollTop;
+    });
     if (options.skipActiveScroll) return;
     const activeOption =
       renderedOptions[referenceSelectorState.activeRowIndex] || null;

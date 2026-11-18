@@ -1,3 +1,4 @@
+import type { PaperTextWriter } from "./paperTextStore";
 import { fnv1a32 } from "../../utils/fnv1a";
 import { paperKey } from "../../shared/paperKey";
 import { appLogger } from "../../core/logging";
@@ -23,6 +24,8 @@ import {
   RRF_K,
 } from "../retrieval/constants";
 import {
+  toRetrievalIndexTerm,
+  toRetrievalIndexTerms,
   tokenizeRetrievalQuery,
   tokenizeRetrievalText,
 } from "../retrieval/retrievalTokenizer";
@@ -80,6 +83,8 @@ import {
 } from "./textAttachmentExtraction";
 import type { TextAttachmentSourceMode } from "./contextAttachmentTypes";
 import { isPdfContextAttachment } from "./contextAttachmentSupport";
+import { seedPageTextCacheFromFullText } from "../pdf/livePdfSelectionLocator";
+import { readAttachmentFileState } from "../../utils/attachmentFileState";
 import { isBodyEvidenceSection } from "../../shared/libraryChatEvidencePolicy";
 import {
   extractDocumentReferenceEvidence,
@@ -323,6 +328,7 @@ export function resolveTextAttachmentSourceMode(
 async function cacheTextAttachment(
   item: Zotero.Item,
   sourceMode: TextAttachmentSourceMode,
+  write: PaperTextWriter,
 ): Promise<void> {
   const title = getAttachmentTitle(item) || `Attachment ${item.id}`;
   try {
@@ -331,7 +337,7 @@ async function cacheTextAttachment(
         item as unknown as { getFilePath?: () => string | undefined }
       ).getFilePath?.() || undefined;
     if (!filePath) {
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks: [],
         chunkMeta: [],
@@ -354,7 +360,7 @@ async function cacheTextAttachment(
         sourceTypeForTextAttachment(sourceMode),
       );
       const { chunkStats, docFreq, avgChunkLength } = buildChunkIndex(chunks);
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks,
         chunkMeta,
@@ -365,7 +371,7 @@ async function cacheTextAttachment(
         sourceType: sourceTypeForTextAttachment(sourceMode),
       });
     } else {
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks: [],
         chunkMeta: [],
@@ -378,16 +384,7 @@ async function cacheTextAttachment(
     }
   } catch (error) {
     appLogger.warn("Error caching text attachment:", error);
-    paperTextStore.write(item.id, {
-      title,
-      chunks: [],
-      chunkMeta: [],
-      chunkStats: [],
-      docFreq: {},
-      avgChunkLength: 0,
-      fullLength: 0,
-      sourceType: sourceTypeForTextAttachment(sourceMode),
-    });
+    throw error;
   }
 }
 
@@ -397,6 +394,7 @@ async function cachePDFText(
     sourceMode?: PaperContentSourceMode;
     preferFulltextCache?: boolean;
   },
+  write: PaperTextWriter = (context) => paperTextStore.write(item.id, context),
 ) {
   if (paperTextStore.has(item.id)) return;
 
@@ -412,7 +410,7 @@ async function cachePDFText(
     const textAttachmentMode =
       requestedTextAttachmentMode || inferredTextAttachmentMode;
     if (textAttachmentMode) {
-      await cacheTextAttachment(item, textAttachmentMode);
+      await cacheTextAttachment(item, textAttachmentMode, write);
       return;
     }
 
@@ -449,8 +447,14 @@ async function cachePDFText(
     }
 
     // 2. Fallback to Zotero.PDFWorker
+    let pdfWorkerFailure: { error: unknown } | undefined;
     const tryPdfWorker = async (pdfItem: Zotero.Item) => {
       try {
+        // The file as this read finds it: page text seeded from the read is
+        // dropped once the PDF is replaced.
+        const fileState = options?.preferFulltextCache
+          ? null
+          : await readAttachmentFileState(pdfItem);
         const result = await Zotero.PDFWorker.getFullText(pdfItem.id);
         if (result && result.text) {
           pdfText = result.text;
@@ -463,8 +467,20 @@ async function cachePDFText(
           )
             ? rawPageChars
             : undefined;
+          // Quote checks need this same text split into pages. Hand it over
+          // instead of letting the quote warm extract the PDF a second time.
+          // Background library indexing reads papers no chat is quoting and
+          // would only evict the pages a chat needs.
+          if (!options?.preferFulltextCache) {
+            void seedPageTextCacheFromFullText(pdfItem.id, result, {
+              fileState,
+            }).catch((error) => {
+              appLogger.debug("LLM: PDF page text seed failed", error);
+            });
+          }
         }
       } catch (e) {
+        pdfWorkerFailure = { error: e };
         appLogger.warn("PDF extraction failed:", e);
       }
     };
@@ -491,6 +507,10 @@ async function cachePDFText(
         if (!pdfText) await tryFulltextCache(pdfItem);
       }
     }
+
+    // A failed extractor is not a successful scan with no text. Let the
+    // scheduler retry it instead of persisting a permanent no-text document.
+    if (!pdfText && pdfWorkerFailure) throw pdfWorkerFailure.error;
 
     if (pdfText) {
       // Try manifest-aware chunking for MinerU papers
@@ -611,7 +631,7 @@ async function cachePDFText(
       }
 
       const { chunkStats, docFreq, avgChunkLength } = buildChunkIndex(chunks);
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks,
         chunkMeta,
@@ -623,7 +643,7 @@ async function cachePDFText(
         sourceType,
       });
     } else {
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks: [],
         chunkMeta: [],
@@ -635,15 +655,7 @@ async function cachePDFText(
     }
   } catch (e) {
     appLogger.warn("Error caching PDF:", formatErrorForLog(e), e);
-    paperTextStore.write(item.id, {
-      title: "",
-      chunks: [],
-      chunkMeta: [],
-      chunkStats: [],
-      docFreq: {},
-      avgChunkLength: 0,
-      fullLength: 0,
-    });
+    throw e;
   }
 }
 
@@ -654,7 +666,7 @@ export function ensurePDFTextCached(
   return paperTextStore.load(item, options, cachePDFText);
 }
 
-async function cacheNoteText(item: Zotero.Item) {
+async function cacheNoteText(item: Zotero.Item, write: PaperTextWriter) {
   if (paperTextStore.has(item.id)) return;
   try {
     const snapshot = readNoteSnapshot(item);
@@ -666,7 +678,7 @@ async function cacheNoteText(item: Zotero.Item) {
       const chunks = splitIntoChunks(text, CHUNK_TARGET_LENGTH);
       const chunkMeta = buildChunkMetadata(chunks);
       const { chunkStats, docFreq, avgChunkLength } = buildChunkIndex(chunks);
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks,
         chunkMeta,
@@ -676,7 +688,7 @@ async function cacheNoteText(item: Zotero.Item) {
         fullLength: text.length,
       });
     } else {
-      paperTextStore.write(item.id, {
+      write({
         title,
         chunks: [],
         chunkMeta: [],
@@ -688,15 +700,7 @@ async function cacheNoteText(item: Zotero.Item) {
     }
   } catch (e) {
     appLogger.warn("Error caching note:", e);
-    paperTextStore.write(item.id, {
-      title: "",
-      chunks: [],
-      chunkMeta: [],
-      chunkStats: [],
-      docFreq: {},
-      avgChunkLength: 0,
-      fullLength: 0,
-    });
+    throw e;
   }
 }
 
@@ -1194,9 +1198,14 @@ const INHERITED_SECTION_KINDS = new Set<PdfChunkKind>([
   "conclusion",
 ]);
 
-/** Back matter ends the standard section before it: nothing after inherits. */
+/**
+ * Back matter ends the standard section before it: nothing after inherits.
+ * "Online content" (the whole heading, never "Online content moderation")
+ * is Nature's heading over the methods pointer that runs into the
+ * reference list.
+ */
 const BACK_MATTER_HEADING_PATTERN =
-  /^(?:references?|bibliography|literature cited|works cited|acknowledg(?:e)?ments?|funding|financial (?:support|disclosures?)|authors?['’]?s? contributions?|competing (?:financial )?interests?|conflicts? of interests?|declarations?(?: of (?:competing )?interests?)?|(?:(?:data|code|materials?|software)(?:,|\s+(?:and|&))?\s+)+availability|availability of (?:data|code|materials?)|supplementary|supporting information|additional (?:information|files)|appendix|appendices)\b/i;
+  /^(?:online content(?=[:.\s-]*$)|references?|bibliography|literature cited|works cited|acknowledg(?:e)?ments?|funding|financial (?:support|disclosures?)|authors?['’]?s? contributions?|competing (?:financial )?interests?|conflicts? of interests?|declarations?(?: of (?:competing )?interests?)?|(?:(?:data|code|materials?|software)(?:,|\s+(?:and|&))?\s+)+availability|availability of (?:data|code|materials?)|supplementary|supporting information|additional (?:information|files)|appendix|appendices)\b/i;
 
 function stripHeadingEnumerator(heading: string): string {
   return normalizeEvidenceText(heading)
@@ -1205,7 +1214,8 @@ function stripHeadingEnumerator(heading: string): string {
     .trim();
 }
 
-function isBackMatterHeading(heading: string): boolean {
+/** Whether a heading opens back matter (references, funding, ...). */
+export function isBackMatterHeading(heading: string): boolean {
   return BACK_MATTER_HEADING_PATTERN.test(stripHeadingEnumerator(heading));
 }
 
@@ -1238,7 +1248,7 @@ function matchBackMatterHeading(
  * structure; when the markdown does nest its headings, a heading no deeper
  * than the standard one is a sibling, not a subsection, and ends it too.
  */
-function enclosingStandardSections(
+export function enclosingStandardSections(
   sections: ManifestSection[],
 ): Array<string | undefined> {
   const nested = new Set(sections.map((section) => section.level)).size > 1;
@@ -1734,10 +1744,15 @@ export function formatSuggestedEvidenceCitation(
   return `(${citationParts.join(", ")})`;
 }
 
+/** A chunk's BM25 terms: index terms (stems of plain English words). */
 function tokenizeText(text: string): string[] {
-  return tokenizeRetrievalText(text);
+  return tokenizeRetrievalText(text, { stem: true });
 }
 
+/**
+ * BM25 term statistics per chunk. `tf` and `docFreq` are keyed by index
+ * terms (`toRetrievalIndexTerm`), so look a surface query term up through it.
+ */
 export function buildChunkIndex(chunks: string[]): {
   chunkStats: ChunkStat[];
   docFreq: Record<string, number>;
@@ -1781,9 +1796,16 @@ function queryPlanTerms(
     : tokenizeQuery(question);
 }
 
+/**
+ * The query variants a chunk matches: the whole variant as a substring, or
+ * one of its terms as a substring or (the BM25 rule) through a shared index
+ * term in the chunk's `tf`, so a chunk BM25 ranked for "error" also names
+ * the variant that asked about "errors".
+ */
 function matchedQueryVariantsForText(
   text: string,
   queryPlan: RetrievalQueryPlan | undefined,
+  chunkTf?: Record<string, number>,
 ): string[] {
   if (!queryPlan?.effectiveQueries.length || !text.trim()) return [];
   const haystack = text.toLocaleLowerCase();
@@ -1795,13 +1817,26 @@ function matchedQueryVariantsForText(
       continue;
     }
     const terms = tokenizeQuery(query);
-    if (terms.length && terms.some((term) => haystack.includes(term))) {
+    if (
+      terms.length &&
+      terms.some(
+        (term) =>
+          haystack.includes(term) ||
+          Boolean(chunkTf?.[toRetrievalIndexTerm(term)]),
+      )
+    ) {
       matches.push(query);
     }
   }
   return Array.from(new Set(matches));
 }
 
+/**
+ * BM25 of one chunk for surface query terms (`lexicalTerms`, or
+ * `tokenizeRetrievalQuery` output). They are mapped to their distinct index
+ * terms here, the keys of `buildChunkIndex`; never pass stems, which would be
+ * stemmed again.
+ */
 export function scoreChunkBM25(
   chunk: ChunkStat,
   terms: string[],
@@ -1814,7 +1849,7 @@ export function scoreChunkBM25(
   const b = 0.75;
   let score = 0;
 
-  for (const term of terms) {
+  for (const term of toRetrievalIndexTerms(terms)) {
     const tf = chunk.tf[term] || 0;
     if (!tf) continue;
     const df = docFreq[term] || 0;
@@ -1881,6 +1916,13 @@ async function ensureEmbeddings(
   const providerKey = embeddingConfig.providerKey;
   const embeddingCacheKey = embeddingConfig.cacheKey;
   const embeddingAttemptKey = embeddingConfig.attemptKey;
+  const attemptIsCurrent = (): boolean => {
+    try {
+      return getResolvedEmbeddingConfig().attemptKey === embeddingAttemptKey;
+    } catch {
+      return false;
+    }
+  };
 
   // Previously failed — don't retry until the effective embedding config changes.
   if (pdfContext.embeddingFailureKey === embeddingAttemptKey) return false;
@@ -1900,13 +1942,15 @@ async function ensureEmbeddings(
     pdfContext.embeddingPromiseKey === embeddingAttemptKey
   ) {
     const result = await pdfContext.embeddingPromise;
-    if (result) {
-      pdfContext.embeddings = result;
-      pdfContext.embeddingCacheKey = embeddingCacheKey;
-      pdfContext.embeddingFailureKey = undefined;
-      return result.length === pdfContext.chunks.length;
-    }
-    return false;
+    // The owner commits the result. A waiter must not overwrite vectors from
+    // a newer provider/configuration after its old promise settles.
+    return Boolean(
+      result &&
+      attemptIsCurrent() &&
+      pdfContext.embeddings === result &&
+      pdfContext.embeddingCacheKey === embeddingCacheKey &&
+      result.length === pdfContext.chunks.length,
+    );
   }
 
   // Layers 2+3: assign the promise slot FIRST (atomically) so concurrent
@@ -1953,6 +1997,7 @@ async function ensureEmbeddings(
     pdfContext.embeddingPromise = undefined;
     pdfContext.embeddingPromiseKey = undefined;
   }
+  if (!ownsPromiseSlot || !attemptIsCurrent()) return false;
   if (result) {
     pdfContext.embeddings = result;
     pdfContext.embeddingCacheKey = embeddingCacheKey;
@@ -2273,11 +2318,18 @@ function shouldTryEmbeddings(): boolean {
  * `body` and `unknown` never move — a prior may break a tie, it may not
  * decide the order (reciprocal-rank fusion spans ~0.03 in total, so the old
  * additive constants of 0.8–1.5 overruled relevance outright).
+ *
+ * Captions and appendices are not demoted. Their kinds come from the text
+ * heuristic (a chunk that starts "Figure 2:", or any mention of "appendix"),
+ * and PDF text runs a caption straight into the body paragraph after it, so a
+ * demoted "caption" was often the passage that held the answer. An offline
+ * replay over QASPER-200 found more gold evidence without the demotion
+ * (scripts/qasper-evidence-replay.ts).
  */
 const SECTION_BOOST_PROFILE: { boost: PdfChunkKind[]; demote: PdfChunkKind[] } =
   {
     boost: ["abstract", "results", "discussion", "conclusion"],
-    demote: ["figure-caption", "table-caption", "appendix", "references"],
+    demote: ["references"],
   };
 
 /** Ranks a boosted section kind can climb. */
@@ -2293,9 +2345,10 @@ const DEMOTED_PRIOR: SectionPrior = { priorShift: 0, demoted: true };
 const NEUTRAL_PRIOR: SectionPrior = { priorShift: 0 };
 
 /**
- * Bounded section prior: a rank shift, not a score. Demoted chunks carry
- * `demoted: true` and sort to the end; they stay candidates so a
- * reference-locked read can still pull a caption or a reference entry back.
+ * Bounded section prior: a rank shift, not a score. Demoted chunks (reference
+ * lists and chunks under MIN_EVIDENCE_WORD_COUNT words) carry `demoted: true`
+ * and sort to the end; they stay candidates so a reference-locked read can
+ * still pull a reference entry back.
  */
 function priorShiftFor(params: {
   chunkText: string;
@@ -2358,19 +2411,18 @@ export function selectStructuredCandidates(params: {
   queryTerms: string[];
   sections: ReadonlyArray<RetrievalSectionSummary>;
   sectionIds?: string[];
+  /** Chunks in scope besides those sections (text with no section ids). */
+  chunkIndexes?: number[];
   hasSignal: boolean;
 }): PaperContextCandidate[] {
   const topK = Math.max(1, Math.floor(params.topK));
   const requestedSectionIds = (params.sectionIds || []).filter(Boolean);
   let pool = params.ranked;
-  if (requestedSectionIds.length) {
-    const wanted = new Set(requestedSectionIds);
+  if (requestedSectionIds.length || params.chunkIndexes?.length) {
     // Same rule as the ranking stage: a requested scope that matches nothing
     // returns nothing rather than widening to the whole document.
-    pool = params.ranked.filter(
-      (candidate) =>
-        candidate.sectionIndex !== undefined &&
-        wanted.has(sectionIdForIndex(candidate.sectionIndex)),
+    pool = params.ranked.filter((candidate) =>
+      inRequestedScope(candidate, requestedSectionIds, params.chunkIndexes),
     );
   }
   if (!pool.length) return [];
@@ -2544,6 +2596,19 @@ function selectSectionDiverseFallback(
   return selected;
 }
 
+/** Whether a candidate is in a requested scope of sections or chunks. */
+function inRequestedScope(
+  candidate: Pick<PaperContextCandidate, "chunkIndex" | "sectionIndex">,
+  sectionIds: readonly string[] = [],
+  chunkIndexes: readonly number[] = [],
+): boolean {
+  return (
+    chunkIndexes.includes(candidate.chunkIndex) ||
+    (candidate.sectionIndex !== undefined &&
+      sectionIds.includes(sectionIdForIndex(candidate.sectionIndex)))
+  );
+}
+
 /** Sections of a document, derived from the chunk metadata. */
 function buildSectionSummaries(
   chunkMeta: PdfChunkMeta[],
@@ -2631,6 +2696,8 @@ export async function buildPaperRetrievalCandidates(
     preferredChunkIndexes?: number[];
     /** Restrict candidates to these section ids (`s<n>`) before ranking. */
     sectionIds?: string[];
+    /** Also in scope: these chunks (text with no section ids). */
+    chunkIndexes?: number[];
   },
   compatibilityOptions?: {
     topK?: number;
@@ -2645,6 +2712,8 @@ export async function buildPaperRetrievalCandidates(
     preferredChunkIndexes?: number[];
     /** Restrict candidates to these section ids (`s<n>`) before ranking. */
     sectionIds?: string[];
+    /** Also in scope: these chunks (text with no section ids). */
+    chunkIndexes?: number[];
   },
 ): Promise<PaperContextCandidate[]> {
   if (!pdfContext) return [];
@@ -2655,7 +2724,8 @@ export async function buildPaperRetrievalCandidates(
     "precomputedQueryEmbedding" in (apiOverridesOrOptions || {}) ||
     "queryPlan" in (apiOverridesOrOptions || {}) ||
     "preferredChunkIndexes" in (apiOverridesOrOptions || {}) ||
-    "sectionIds" in (apiOverridesOrOptions || {})
+    "sectionIds" in (apiOverridesOrOptions || {}) ||
+    "chunkIndexes" in (apiOverridesOrOptions || {})
       ? apiOverridesOrOptions
       : undefined);
   const { chunks, chunkStats, docFreq, avgChunkLength } = pdfContext;
@@ -2754,6 +2824,7 @@ export async function buildPaperRetrievalCandidates(
     const matchedQueryVariants = matchedQueryVariantsForText(
       chunks[chunk.index],
       queryPlan,
+      chunk.tf,
     );
     const candidate: PaperContextCandidate = {
       paperKey: buildPaperKey(paperContext),
@@ -2853,18 +2924,17 @@ export async function buildPaperRetrievalCandidates(
     (adjustedRank.get(a) || 0) - (adjustedRank.get(b) || 0) ||
     (fusedRank.get(a) || 0) - (fusedRank.get(b) || 0);
   const allRanked = [...candidates].sort(byAdjustedRank);
-  const requestedSections = new Set(options?.sectionIds || []);
-  const restricted = requestedSections.size
-    ? allRanked.filter(
-        (candidate) =>
-          candidate.sectionIndex !== undefined &&
-          requestedSections.has(sectionIdForIndex(candidate.sectionIndex)),
-      )
-    : [];
+  const scoped = Boolean(
+    options?.sectionIds?.length || options?.chunkIndexes?.length,
+  );
   // Every later reservation and fallback must obey the same valid scope.
   // A requested scope that matches nothing returns nothing: falling back to
   // the whole document would deliver out-of-scope passages without a warning.
-  const ranked = requestedSections.size ? restricted : allRanked;
+  const ranked = scoped
+    ? allRanked.filter((candidate) =>
+        inRequestedScope(candidate, options?.sectionIds, options?.chunkIndexes),
+      )
+    : allRanked;
 
   // Stage 2 — structure.
   const selected = selectStructuredCandidates({
@@ -2873,6 +2943,7 @@ export async function buildPaperRetrievalCandidates(
     queryTerms: terms,
     sections: buildSectionSummaries(chunkMeta),
     sectionIds: options?.sectionIds,
+    chunkIndexes: options?.chunkIndexes,
     hasSignal: bm25Scores.some((score) => score > 0) || embedRank !== null,
   });
   const selectionOrder = new Map(

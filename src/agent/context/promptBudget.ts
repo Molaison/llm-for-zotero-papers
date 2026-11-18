@@ -1,8 +1,14 @@
+import {
+  buildOpenAIFunctionTools,
+  buildResponsesFunctionTools,
+} from "../model/shared";
+import { retainToolRejectionFeedback } from "./toolRejectionFeedback";
 import { fnv1a32Raw } from "../../utils/fnv1a";
 import type {
   AgentModelContentPart,
   AgentModelMessage,
   AgentToolMessage,
+  ToolSpec,
 } from "../types";
 import {
   createAgentToolResultHandleRecord,
@@ -10,19 +16,28 @@ import {
 } from "../store/toolResultHandles";
 import {
   estimateContextMessagesTokens,
+  estimateWirePayloadTokens,
   estimateTextTokens,
   resolveModelInputTokenLimit,
   sliceTextToTokenBudget,
   type ModelInputTokenLimitSource,
 } from "../../utils/modelInputCap";
-import type { ModelProfileOverride } from "../../modelCapabilities";
+import type {
+  ModelCapabilityLimits,
+  ModelProfileOverride,
+} from "../../modelCapabilities";
 import type { OutputTokenLimitSetting } from "../../shared/types";
 import {
   resolveContextAllocation,
   resolveOutputRequestPolicy,
 } from "../../utils/outputTokenPolicy";
 import { normalizeProviderProtocol } from "../../utils/providerProtocol";
-import { durableTranscriptMessages } from "./transcriptCompactor";
+import {
+  AgentTaskContextBudgetError,
+  buildAgentSemanticCheckpoint,
+  durableTranscriptMessages,
+  hasAgentTaskContext,
+} from "./transcriptCompactor";
 import { normalizeQuoteTokenId } from "../../services/quotes/quoteTokenIds";
 import { isCatalogToolName, isPaperEvidenceToolName } from "./toolNames";
 
@@ -76,6 +91,46 @@ export type AgentPromptBudgetResult = {
   handleRecords: AgentToolResultHandleRecord[];
 };
 
+/** Bound both existing wire normalizations (chat and Responses). JSON text
+ * keeps schema keys in the estimate where the structural wire walker omits them.
+ * No registry/execution-only fields or fixed per-tool surcharge are counted.
+ */
+export function estimateAgentToolTokens(tools: ToolSpec[] = []): number {
+  if (!tools.length) return 0;
+  return Math.max(
+    ...[
+      buildOpenAIFunctionTools(tools),
+      buildResponsesFunctionTools(tools),
+    ].map((payload) =>
+      Math.max(
+        estimateWirePayloadTokens(payload),
+        estimateTextTokens(JSON.stringify(payload)),
+      ),
+    ),
+  );
+}
+
+export function estimateAgentPromptTokens(
+  messages: AgentModelMessage[],
+  tools: ToolSpec[] = [],
+): number {
+  return (
+    estimateContextMessagesTokens(messages) + estimateAgentToolTokens(tools)
+  );
+}
+
+export function assertAgentPromptBudget(params: {
+  estimatedTokens: number;
+  softLimitTokens: number;
+  contextWindow: number;
+}): void {
+  if (params.estimatedTokens > params.softLimitTokens)
+    throw new AgentPromptBudgetError(
+      buildGracefulOverBudgetMessage(params),
+      params,
+    );
+}
+
 export function resolveAgentPromptBudgetLimits(params: {
   model?: string;
   inputTokenCap?: number;
@@ -83,6 +138,7 @@ export function resolveAgentPromptBudgetLimits(params: {
   providerProtocol?: string;
   authMode?: string;
   profileOverride?: ModelProfileOverride;
+  requestModelLimits?: ModelCapabilityLimits;
   outputTokenLimit?: OutputTokenLimitSetting;
 }): AgentPromptBudgetLimits {
   const resolvedLimit = resolveModelInputTokenLimit(
@@ -93,6 +149,7 @@ export function resolveAgentPromptBudgetLimits(params: {
       protocol: params.providerProtocol,
       authMode: params.authMode,
       profileOverride: params.profileOverride,
+      requestModelLimits: params.requestModelLimits,
     },
   );
   // The soft limit is the shared context allocation's input budget, so a
@@ -516,6 +573,8 @@ function compactPaperMatch(record: unknown): Record<string, unknown> {
     "firstCreator",
     "year",
     "matchStatus",
+    "passageStatus",
+    "workGroupId",
     "score",
     "sourceKind",
     "evidenceCount",
@@ -690,13 +749,14 @@ function buildEvidenceCompactToolResult(params: {
   const tryPush = (
     key: "paperMatches" | "snippets" | "results" | "papers",
     value: Record<string, unknown>,
+    maxTokens = params.maxTokens,
   ): boolean => {
     (next[key] as Record<string, unknown>[]).push(value);
     (next.modelContextOmitted as Record<string, number>)[key] = Math.max(
       0,
       (next.modelContextOmitted as Record<string, number>)[key] - 1,
     );
-    if (estimateTextTokens(stableStringify(next)) <= params.maxTokens) {
+    if (estimateTextTokens(stableStringify(next)) <= maxTokens) {
       return true;
     }
     (next[key] as Record<string, unknown>[]).pop();
@@ -704,6 +764,19 @@ function buildEvidenceCompactToolResult(params: {
     return false;
   };
 
+  // Paper rows are short and name every paper the evidence covers, so they
+  // get room before the snippets: up to half of what the base leaves while
+  // snippets wait, and the rest once the snippets are in.
+  const baseTokens = estimateTextTokens(stableStringify(next));
+  const paperRowReserve = snippets.length
+    ? baseTokens + Math.max(0, params.maxTokens - baseTokens) / 2
+    : params.maxTokens;
+  let paperRowsPushed = 0;
+  for (const match of paperMatches) {
+    if (!tryPush("paperMatches", compactPaperMatch(match), paperRowReserve))
+      break;
+    paperRowsPushed += 1;
+  }
   for (const snippet of snippets) {
     if (
       !tryPush(
@@ -713,7 +786,7 @@ function buildEvidenceCompactToolResult(params: {
     )
       break;
   }
-  for (const match of paperMatches) {
+  for (const match of paperMatches.slice(paperRowsPushed)) {
     if (!tryPush("paperMatches", compactPaperMatch(match))) break;
   }
   for (const result of results) {
@@ -750,6 +823,12 @@ function compactToolContent(params: {
   content: unknown;
   maxTokens: number;
 }): unknown {
+  const error =
+    params.content && typeof params.content === "object"
+      ? (params.content as Record<string, unknown>).error
+      : undefined;
+  if (typeof error === "string")
+    return { modelContextCompacted: true, error: compactScalar(error, 320) };
   if (isLibrarySearchTool(params.toolName)) {
     return buildLibraryCompactToolResult(params);
   }
@@ -777,6 +856,9 @@ function buildToolResultHandle(params: {
     : undefined;
   return {
     modelContextCleared: true,
+    ...(typeof content.error === "string"
+      ? { error: compactScalar(content.error, 320) }
+      : {}),
     toolName: params.message.name,
     toolCallId: params.message.tool_call_id,
     argumentDigest: params.argumentDigest,
@@ -826,7 +908,25 @@ function buildHistoryCheckpoint(params: {
   resourceSignature?: string;
   argumentDigestById: Map<string, string>;
   handleRecords: AgentToolResultHandleRecord[];
+  maxTokens?: number;
 }): AgentModelMessage {
+  // A task checkpoint is structured user history, not a 240-character user
+  // excerpt. Share its encoding, provenance checks and exact-reference fallback
+  // with semantic compaction so budget -> semantic restarts stay reversible.
+  if (hasAgentTaskContext(params.messages)) {
+    const semantic = buildAgentSemanticCheckpoint({
+      messages: params.messages,
+      conversationKey: params.conversationKey,
+      resourceSignature: params.resourceSignature,
+      summaryTokens: Math.min(
+        HISTORY_CHECKPOINT_MAX_TOKENS,
+        Math.max(0, params.maxTokens ?? HISTORY_CHECKPOINT_MAX_TOKENS),
+      ),
+      maxTokens: params.maxTokens,
+    });
+    params.handleRecords.push(...semantic.handleRecords);
+    return semantic.checkpoint;
+  }
   const userLines: string[] = [];
   const assistantLines: string[] = [];
   const toolLines: string[] = [];
@@ -878,8 +978,12 @@ function buildHistoryCheckpoint(params: {
   ].filter(Boolean);
   return {
     role: "user",
-    content: truncateStringToTokenBudget(
-      sections.join("\n\n"),
+    content: retainToolRejectionFeedback(
+      truncateStringToTokenBudget(
+        sections.join("\n\n"),
+        HISTORY_CHECKPOINT_MAX_TOKENS,
+      ),
+      params.messages,
       HISTORY_CHECKPOINT_MAX_TOKENS,
     ),
   };
@@ -907,9 +1011,11 @@ function compactOlderHistory(params: {
   resourceSignature?: string;
   argumentDigestById: Map<string, string>;
   handleRecords: AgentToolResultHandleRecord[];
+  messageBudgetTokens: number;
 }): {
   messages: AgentModelMessage[];
   changed: boolean;
+  taskCheckpoint?: { message: AgentModelMessage; source: AgentModelMessage[] };
 } {
   const messages = params.messages;
   const latestUserIndex = findLatestRootUserIndex(messages);
@@ -924,19 +1030,32 @@ function compactOlderHistory(params: {
     .slice(latestUserIndex)
     .filter((message) => message.role !== "system");
   if (!older.length) return { messages, changed: false };
+  // First reserve the task against fixed messages and tool definitions, not raw
+  // tail tool bodies that the existing reduction stages can still shorten.
+  // If those stages cannot make it fit, refit against their actual final cost.
+  const maxTokens = Math.max(
+    0,
+    params.messageBudgetTokens -
+      estimateContextMessagesTokens([
+        ...systemMessages,
+        ...tail.filter((message) => message.role !== "tool"),
+      ]) -
+      estimateContextMessagesTokens([{ role: "user", content: "" }]),
+  );
+  const checkpoint = buildHistoryCheckpoint({
+    messages: older,
+    conversationKey: params.conversationKey,
+    resourceSignature: params.resourceSignature,
+    argumentDigestById: params.argumentDigestById,
+    handleRecords: params.handleRecords,
+    maxTokens,
+  });
   return {
-    messages: [
-      ...systemMessages,
-      buildHistoryCheckpoint({
-        messages: older,
-        conversationKey: params.conversationKey,
-        resourceSignature: params.resourceSignature,
-        argumentDigestById: params.argumentDigestById,
-        handleRecords: params.handleRecords,
-      }),
-      ...tail,
-    ],
+    messages: [...systemMessages, checkpoint, ...tail],
     changed: true,
+    ...(hasAgentTaskContext(older)
+      ? { taskCheckpoint: { message: checkpoint, source: older } }
+      : {}),
   };
 }
 
@@ -951,6 +1070,58 @@ function protectedLatestToolCallIds(
     return new Set(message.tool_calls.map((call) => call.id));
   }
   return new Set();
+}
+
+function buildContextReadCompactToolResult(
+  source: Record<string, unknown>,
+): Record<string, unknown> {
+  const originalPage: Record<string, unknown> = {};
+  // Exact cursors describe the stored page, NOT text delivered in this view.
+  // Do not shorten handles/paths or advance a cursor past an omitted body.
+  for (const key of [
+    "source",
+    "handle",
+    "messageId",
+    "role",
+    "toolName",
+    "toolCallId",
+    "inputDigest",
+    "resourceSignature",
+    "currentResourceSignature",
+    "createdAt",
+    "path",
+    "availablePaths",
+    "offset",
+    "textOffset",
+    "nextOffset",
+    "nextTextOffset",
+    "format",
+    "totalChars",
+    "requestedLimit",
+    "totalCount",
+    "returnedCount",
+    "omittedCount",
+  ]) {
+    if (source[key] !== undefined) originalPage[key] = source[key];
+  }
+  if (source.itemChunk && typeof source.itemChunk === "object") {
+    const { text: _text, ...cursor } = source.itemChunk as Record<
+      string,
+      unknown
+    >;
+    originalPage.itemChunk = cursor;
+  }
+  const result: Record<string, unknown> = {
+    modelContextCompacted: true,
+    originalPage,
+    notice:
+      "context_read body omitted under context pressure; this view does not deliver the original page or establish that it was read. Read the exact omitted page via toolResultHandle before advancing any source cursor. originalPage contains the original source location and pagination, not coverage of this reduced view.",
+  };
+  // Errors and scope warnings must remain truthful, even if they cannot fit.
+  for (const key of ["ok", "status", "error", "warnings", "stale"]) {
+    if (source[key] !== undefined) result[key] = source[key];
+  }
+  return result;
 }
 
 function compactToolMessageToTokens(params: {
@@ -977,17 +1148,33 @@ function compactToolMessageToTokens(params: {
     content: parsed,
     argumentDigest,
   });
-  const compactedContent = params.clearToHandle
-    ? buildToolResultHandle({
-        message: params.message,
-        content: parsed,
-        argumentDigest,
-      })
-    : compactToolContent({
-        toolName: params.message.name,
-        content: parsed,
-        maxTokens: params.maxTokens,
-      });
+  const isContextRead = params.message.name === "context_read";
+  // Read-only stored context is replayable, but only clear its body when the
+  // caller can persist an exact recovery record. Never clear a receipt/error
+  // using the generic excerpt path, or replace an already compacted page.
+  if (
+    isContextRead &&
+    (!handleRecord ||
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      (parsed as Record<string, unknown>).modelContextCompacted === true)
+  ) {
+    return null;
+  }
+  const compactedContent = isContextRead
+    ? buildContextReadCompactToolResult(parsed as Record<string, unknown>)
+    : params.clearToHandle
+      ? buildToolResultHandle({
+          message: params.message,
+          content: parsed,
+          argumentDigest,
+        })
+      : compactToolContent({
+          toolName: params.message.name,
+          content: parsed,
+          maxTokens: params.maxTokens,
+        });
   const content = attachToolResultHandle({
     content: compactedContent,
     handleRecord,
@@ -1076,12 +1263,14 @@ function buildGracefulOverBudgetMessage(params: {
 
 export function enforceAgentPromptBudget(params: {
   messages: AgentModelMessage[];
+  tools?: ToolSpec[];
   model?: string;
   inputTokenCap?: number;
   apiBase?: string;
   providerProtocol?: string;
   authMode?: string;
   profileOverride?: ModelProfileOverride;
+  requestModelLimits?: ModelCapabilityLimits;
   outputTokenLimit?: OutputTokenLimitSetting;
   conversationKey?: number;
   resourceSignature?: string;
@@ -1093,12 +1282,16 @@ export function enforceAgentPromptBudget(params: {
     providerProtocol: params.providerProtocol,
     authMode: params.authMode,
     profileOverride: params.profileOverride,
+    requestModelLimits: params.requestModelLimits,
     outputTokenLimit: params.outputTokenLimit,
   });
   let messages = params.messages.map((message) => cloneMessage(message));
   const reductions: AgentPromptReduction[] = [];
   const handleRecords: AgentToolResultHandleRecord[] = [];
-  const estimatedBeforeTokens = estimateContextMessagesTokens(messages);
+  const toolTokens = estimateAgentToolTokens(params.tools);
+  const messageSoftLimitTokens = limits.softLimitTokens - toolTokens;
+  const estimatedBeforeTokens =
+    estimateContextMessagesTokens(messages) + toolTokens;
   let changed = false;
   if (estimatedBeforeTokens <= limits.softLimitTokens) {
     return {
@@ -1121,6 +1314,7 @@ export function enforceAgentPromptBudget(params: {
     resourceSignature: params.resourceSignature,
     argumentDigestById,
     handleRecords,
+    messageBudgetTokens: messageSoftLimitTokens,
   });
   if (historyCompaction.changed) {
     messages = historyCompaction.messages;
@@ -1167,15 +1361,24 @@ export function enforceAgentPromptBudget(params: {
         !isEvidenceTool(message.name) &&
         !protectedToolIds.has(message.tool_call_id),
     },
+    {
+      kind: "generic_compacted" as const,
+      minTokens: MIN_GENERIC_TOOL_TOKENS,
+      // Only persisted context reads may relax latest-batch protection.
+      // Mutation receipts and all other generic latest outputs stay intact.
+      predicate: (message: AgentToolMessage) =>
+        message.name === "context_read" &&
+        protectedToolIds.has(message.tool_call_id),
+    },
   ];
 
   for (const stage of stages) {
-    if (estimateContextMessagesTokens(messages) <= limits.softLimitTokens) {
+    if (estimateContextMessagesTokens(messages) <= messageSoftLimitTokens) {
       break;
     }
     const reduced = reduceToolMessages({
       messages,
-      softLimitTokens: limits.softLimitTokens,
+      softLimitTokens: messageSoftLimitTokens,
       reductions,
       predicate: stage.predicate,
       kind: stage.kind,
@@ -1189,21 +1392,83 @@ export function enforceAgentPromptBudget(params: {
     changed = changed || reduced.changed;
   }
 
-  const estimatedAfterTokens = estimateContextMessagesTokens(messages);
-  if (estimatedAfterTokens > limits.softLimitTokens) {
-    throw new AgentPromptBudgetError(
-      buildGracefulOverBudgetMessage({
-        estimatedTokens: estimatedAfterTokens,
-        softLimitTokens: limits.softLimitTokens,
-        contextWindow: limits.contextWindow,
-      }),
-      {
-        estimatedTokens: estimatedAfterTokens,
-        softLimitTokens: limits.softLimitTokens,
-        contextWindow: limits.contextWindow,
-      },
-    );
+  if (
+    historyCompaction.taskCheckpoint &&
+    Number.isInteger(params.conversationKey) &&
+    Number(params.conversationKey) > 0 &&
+    estimateContextMessagesTokens(messages) > messageSoftLimitTokens
+  ) {
+    // Many evidence replies can exceed the aggregate budget even when each
+    // is below the normal per-result evidence floor. Persist/clear only older
+    // unprotected evidence before sacrificing the task or failing a refit.
+    // Latest results and mutation receipts keep their existing protection.
+    const reduced = reduceToolMessages({
+      messages,
+      softLimitTokens: messageSoftLimitTokens,
+      reductions,
+      predicate: (entry) =>
+        isEvidenceTool(entry.name) && !protectedToolIds.has(entry.tool_call_id),
+      kind: "evidence_compacted",
+      minTokens: TOOL_HANDLE_MAX_TOKENS,
+      conversationKey: params.conversationKey,
+      resourceSignature: params.resourceSignature,
+      handleRecords,
+      clearToHandle: true,
+    });
+    messages = reduced.messages;
+    changed = changed || reduced.changed;
   }
+
+  if (
+    historyCompaction.taskCheckpoint &&
+    estimateContextMessagesTokens(messages) > messageSoftLimitTokens
+  ) {
+    const { message, source } = historyCompaction.taskCheckpoint;
+    const index = messages.indexOf(message);
+    const maxTokens = Math.max(
+      0,
+      messageSoftLimitTokens -
+        estimateContextMessagesTokens(
+          messages.filter((entry) => entry !== message),
+        ) -
+        estimateContextMessagesTokens([{ role: "user", content: "" }]),
+    );
+    try {
+      messages[index] = buildHistoryCheckpoint({
+        messages: source,
+        conversationKey: params.conversationKey,
+        resourceSignature: params.resourceSignature,
+        argumentDigestById,
+        handleRecords,
+        maxTokens,
+      });
+    } catch (error) {
+      if (error instanceof AgentTaskContextBudgetError) {
+        Object.assign(error, {
+          promptBudget: {
+            messageBudgetTokens: messageSoftLimitTokens,
+            toolTokens,
+            messages: messages.map((entry) => ({
+              role: entry.role,
+              toolName: entry.role === "tool" ? entry.name : undefined,
+              transient: entry.role === "user" && Boolean(entry.transient),
+              checkpoint: entry === message,
+              tokens: estimateContextMessagesTokens([entry]),
+            })),
+          },
+        });
+      }
+      throw error;
+    }
+  }
+
+  const estimatedAfterTokens =
+    estimateContextMessagesTokens(messages) + toolTokens;
+  assertAgentPromptBudget({
+    estimatedTokens: estimatedAfterTokens,
+    softLimitTokens: limits.softLimitTokens,
+    contextWindow: limits.contextWindow,
+  });
 
   return {
     messages,

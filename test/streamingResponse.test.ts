@@ -33,7 +33,7 @@ function harness(initialText = "") {
 }
 
 /** Long enough to cross the coalescer's target, ending at a block boundary. */
-const PARAGRAPH = `${"word ".repeat(40)}\n\n`;
+const PARAGRAPH = `${"word ".repeat(60)}\n\n`;
 
 describe("streaming response owner", function () {
   describe("lifecycle", function () {
@@ -264,7 +264,7 @@ describe("streaming response owner", function () {
       streamingResponse.start();
       streamingResponse.push("stalled");
       assert.equal(scheduled.length, 1, "a buffered delta arms the timer");
-      assert.equal(scheduled[0].delayMs, 450);
+      assert.equal(scheduled[0].delayMs, 120);
       assert.equal(message.text, "");
 
       scheduled[0].callback();
@@ -304,7 +304,7 @@ describe("streaming response owner", function () {
         streamingResponse.push("stalled");
         streamingResponse.flush("final");
 
-        assert.deepEqual(delays, [450]);
+        assert.deepEqual(delays, [120]);
         assert.deepEqual(cleared, [handle]);
         assert.equal(message.text, "stalled");
       } finally {

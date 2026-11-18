@@ -153,6 +153,7 @@ describe("reader text inclusion", function () {
     );
 
     assert.equal(result.outcome, "added");
+    assert.equal(result.selectedText, "cached pointer-down selection");
     assert.deepInclude(getSelectedTextContextEntries(conversationKey)[0], {
       contextItemId: 43,
       pageIndex: 2,
@@ -257,7 +258,7 @@ describe("reader text inclusion", function () {
     assert.deepEqual(getSelectedTextContextEntries(8105), []);
   });
 
-  it("rejects duplicate and over-limit selections", async function () {
+  it("reports a duplicate selection apart from a full list", async function () {
     const conversationKey = 8106;
     const panel = fakePanelBody(conversationKey);
     activeContextPanelStateSync.set(panel.body, () => undefined);
@@ -272,9 +273,16 @@ describe("reader text inclusion", function () {
     const duplicate = await includeReaderSelectedText({
       body: panel.body,
       conversationKey,
-      selectedText: "duplicate selection",
+      selectedText: "  duplicate\n selection ",
       initialLocation: { contextItemId: 46, pageIndex: 0 },
     });
+    assert.equal(duplicate.outcome, "duplicate");
+    assert.isFalse(duplicate.added);
+    assert.equal(duplicate.selectedText, "duplicate selection");
+    assert.equal(panel.status.textContent, "Selected text already included");
+    assert.include(panel.status.className, "llm-status-ready");
+    assert.lengthOf(getSelectedTextContextEntries(conversationKey), 1);
+
     for (let index = 1; index < 5; index++) {
       appendSelectedTextContextForItem(
         conversationKey,
@@ -291,8 +299,8 @@ describe("reader text inclusion", function () {
       initialLocation: { contextItemId: 46, pageIndex: 5 },
     });
 
-    assert.equal(duplicate.outcome, "not-added");
     assert.equal(overLimit.outcome, "not-added");
+    assert.equal(overLimit.selectedText, "sixth selection");
     assert.equal(panel.status.textContent, "Text Context up to 5");
     assert.lengthOf(getSelectedTextContextEntries(conversationKey), 5);
   });

@@ -9,6 +9,8 @@ import {
   buildEvidenceCacheKey,
   RetrievalService,
 } from "../src/agent/services/retrievalService";
+import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
+import type { AgentToolContext, AgentToolDefinition } from "../src/agent/types";
 
 describe("RetrievalService", function () {
   it("keeps evidence-mode ordering instead of re-sorting by raw hybrid score", async function () {
@@ -276,6 +278,121 @@ describe("RetrievalService", function () {
     assert.equal(results[0].chunkIndex, 7);
     assert.equal(results[0].paperContext.itemId, 2);
     assert.equal(results[1].paperContext.itemId, 1);
+  });
+
+  describe("a read of several papers with a small topK", function () {
+    const papers: PaperContextRef[] = [1, 2, 3].map((itemId) => ({
+      libraryID: 1,
+      itemId,
+      contextItemId: itemId * 11,
+      title: `Paper ${itemId}`,
+      firstCreator: `Author${itemId}`,
+      year: "2024",
+    }));
+    const emptyContext = {
+      title: "Mock Paper",
+      chunks: [],
+      chunkMeta: [],
+      chunkStats: [],
+      docFreq: {},
+      avgChunkLength: 0,
+      fullLength: 0,
+    } as PdfContext;
+    // Paper 1 outscores every other paper on both of its chunks, so a cut by
+    // score alone keeps only paper 1.
+    function service(): RetrievalService {
+      return new RetrievalService(
+        { ensurePaperContext: async () => emptyContext } as any,
+        async (paperContext) =>
+          [0, 1].map(
+            (rank) =>
+              ({
+                paperKey: `${paperContext.itemId}:${paperContext.contextItemId}`,
+                itemId: paperContext.itemId,
+                contextItemId: paperContext.contextItemId,
+                title: paperContext.title || "",
+                chunkIndex: rank,
+                chunkText: `Paper ${paperContext.itemId} passage ${rank} on place field stability.`,
+                estimatedTokens: 10,
+                bm25Score: 1,
+                embeddingScore: 0,
+                hybridScore: 1 / (paperContext.itemId + rank),
+                evidenceScore: (paperContext.itemId === 1 ? 10 : 1) - rank,
+              }) as PaperContextCandidate,
+          ),
+      );
+    }
+
+    it("keeps each paper's best chunk, then fills the rest by score", async function () {
+      const one = await service().retrieveEvidence({
+        papers,
+        question: "place field stability",
+        topK: 1,
+        perPaperTopK: 1,
+      });
+      assert.sameMembers(
+        one.map((result) => result.paperContext.itemId),
+        [1, 2, 3],
+        "the call cap is never smaller than the number of papers",
+      );
+      const four = await service().retrieveEvidence({
+        papers,
+        question: "place field stability",
+        topK: 4,
+        perPaperTopK: 2,
+      });
+      assert.deepEqual(
+        four.map((result) => [result.paperContext.itemId, result.chunkIndex]),
+        [
+          [1, 0],
+          [1, 1],
+          [2, 0],
+          [3, 0],
+        ],
+      );
+    });
+
+    it("labels no paper no_matches in paper_read when each had candidates", async function () {
+      const tool = createPaperReadTool(
+        { ensurePaperContext: async () => emptyContext } as never,
+        service() as never,
+        {} as never,
+        {
+          listPaperContexts: () => papers,
+          resolvePaperContextTarget: (target: { itemId?: number }) =>
+            papers.find((paper) => paper.itemId === target.itemId) || null,
+        } as never,
+      ) as unknown as AgentToolDefinition<never, unknown>;
+      const validated = tool.validate({
+        mode: "targeted",
+        query: "place field stability",
+        topK: 1,
+        targets: papers.map(({ itemId, contextItemId }) => ({
+          itemId,
+          contextItemId,
+        })),
+      });
+      assert.isTrue(validated.ok);
+      if (!validated.ok) return;
+      const output = (await tool.execute(validated.value, {
+        request: {
+          conversationKey: 5,
+          mode: "agent",
+          userText: "How stable are place fields?",
+          libraryID: 1,
+        } as never,
+        item: null,
+        currentAnswerText: "",
+        modelName: "test-model",
+      } as AgentToolContext)) as {
+        papers: Array<{ status: string; passages: unknown[] }>;
+      };
+      assert.lengthOf(output.papers, 3);
+      for (const group of output.papers) {
+        assert.notEqual(group.status, "no_matches");
+        assert.isAtLeast(group.passages.length, 1);
+      }
+    });
   });
 });
 

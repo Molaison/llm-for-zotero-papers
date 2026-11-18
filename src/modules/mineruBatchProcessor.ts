@@ -88,6 +88,11 @@ let queue: QueueEntry[] = [];
 let queueBuilt = false;
 const listeners = new Set<(s: MineruBatchState) => void>();
 let currentAbort: AbortController | null = null;
+// A reset replaces both the queue builder and its delayed processing tail.
+let batchGeneration = 0;
+let nextTimer: ReturnType<typeof setTimeout> | null = null;
+let processingTask: Promise<void> | null = null;
+let rebuildTask: Promise<void> | null = null;
 
 function getAbortControllerCtor(): (new () => AbortController) | null {
   return (
@@ -247,7 +252,7 @@ function getPdfAttachmentDisplayTitle(pdfAtt: Zotero.Item): string {
 
 // ── Queue building ───────────────────────────────────────────────────────────
 
-async function buildQueue(): Promise<void> {
+async function buildQueue(generation: number): Promise<void> {
   const libraryID = Zotero.Libraries.userLibraryID;
   const allItems: Zotero.Item[] = await Zotero.Items.getAll(
     libraryID,
@@ -272,7 +277,7 @@ async function buildQueue(): Promise<void> {
   });
 
   // Build queue — skip items already cached or excluded by parse filters
-  queue = [];
+  const builtQueue: QueueEntry[] = [];
   let processed = 0;
   let totalEligible = 0;
   const filenameMatcher = buildMineruFilenameMatcher();
@@ -297,7 +302,7 @@ async function buildQueue(): Promise<void> {
     if (cached) {
       processed++;
     } else {
-      queue.push({
+      builtQueue.push({
         parentItemId: parentItem?.id || pdfAtt.id,
         attachmentId: pdfAtt.id,
         title,
@@ -306,6 +311,8 @@ async function buildQueue(): Promise<void> {
     }
   }
 
+  if (generation !== batchGeneration) return;
+  queue = builtQueue;
   state.totalCount = totalEligible;
   state.processedCount = processed;
   queueBuilt = true;
@@ -314,7 +321,8 @@ async function buildQueue(): Promise<void> {
 
 // ── Processing loop ──────────────────────────────────────────────────────────
 
-async function processNext(): Promise<void> {
+async function processNext(generation: number): Promise<void> {
+  if (generation !== batchGeneration) return;
   if (state.paused || queue.length === 0) {
     state.running = false;
     state.currentItemId = null;
@@ -343,7 +351,7 @@ async function processNext(): Promise<void> {
         `MinerU batch: item ${entry.attachmentId} not found, skipping`,
       );
       setItemFailed(entry.attachmentId, "Item not found");
-      scheduleNext();
+      scheduleNext(generation);
       return;
     }
 
@@ -351,12 +359,13 @@ async function processNext(): Promise<void> {
       pdfItem as unknown as { getFilePathAsync?: () => Promise<string | false> }
     ).getFilePathAsync?.();
 
+    if (generation !== batchGeneration) return;
     if (!pdfPath) {
       appLogger.debug(
         `MinerU batch: no file path for ${entry.attachmentId}, skipping`,
       );
       setItemFailed(entry.attachmentId, "No file path");
-      scheduleNext();
+      scheduleNext(generation);
       return;
     }
 
@@ -397,12 +406,14 @@ async function processNext(): Promise<void> {
         return parsed;
       },
       (stage) => {
+        if (generation !== batchGeneration) return;
         lastProgressStage = stage;
         state.statusMessage = stage;
         notify();
       },
       abort?.signal,
     );
+    if (generation !== batchGeneration) return;
     if (result?.mdContent) {
       state.processedCount++;
       state.lastFailedItemId = null;
@@ -417,6 +428,7 @@ async function processNext(): Promise<void> {
       state.failedCount++;
     }
   } catch (e) {
+    if (generation !== batchGeneration) return;
     if (e instanceof MineruCancelledError) {
       appLogger.debug(`MinerU batch: cancelled "${entry.title}"`);
       setItemFailed(entry.attachmentId, "Cancelled");
@@ -430,7 +442,12 @@ async function processNext(): Promise<void> {
       state.lastFailedItemId = entry.attachmentId;
       state.lastFailedMessage = "Cancelled";
       currentAbort = null;
-      notify();
+      if (!state.paused) {
+        state.running = true;
+        scheduleNext(generation);
+      } else {
+        notify();
+      }
       return;
     }
     if (e instanceof MineruRateLimitError) {
@@ -456,7 +473,7 @@ async function processNext(): Promise<void> {
       state.totalCount--;
       appLogger.debug(`MinerU batch: skipped "${entry.title}" - ${e.message}`);
       currentAbort = null;
-      scheduleNext();
+      scheduleNext(generation);
       return;
     }
     const errMsg = (e as Error).message || String(e);
@@ -468,15 +485,40 @@ async function processNext(): Promise<void> {
   }
 
   currentAbort = null;
-  scheduleNext();
+  scheduleNext(generation);
 }
 
-function scheduleNext(): void {
+function launchNext(generation: number): void {
+  if (generation !== batchGeneration) return;
+  const task = processNext(generation);
+  processingTask = task;
+  void task.then(
+    () => {
+      if (processingTask === task) processingTask = null;
+    },
+    (error) => {
+      if (processingTask === task) processingTask = null;
+      if (generation !== batchGeneration) return;
+      currentAbort = null;
+      state.running = false;
+      state.currentItemId = null;
+      state.currentItemTitle = "";
+      state.error = error instanceof Error ? error.message : String(error);
+      notify();
+    },
+  );
+}
+
+function scheduleNext(generation: number): void {
+  if (generation !== batchGeneration) return;
   state.currentItemId = null;
   state.currentItemTitle = "";
   state.statusMessage = "";
   notify();
-  setTimeout(() => void processNext(), 500);
+  nextTimer = setTimeout(() => {
+    nextTimer = null;
+    launchNext(generation);
+  }, 500);
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -486,8 +528,15 @@ export function getMineruBatchState(): MineruBatchState {
 }
 
 export async function startBatchProcessing(): Promise<void> {
-  if (state.running) return;
+  if (state.running) {
+    if (state.paused && !rebuildTask) {
+      state.paused = false;
+      notify();
+    }
+    return;
+  }
 
+  const generation = ++batchGeneration;
   state.paused = false;
   state.rateLimited = false;
   state.error = null;
@@ -497,17 +546,23 @@ export async function startBatchProcessing(): Promise<void> {
   state.lastFailedItemId = null;
   notify();
 
-  if (!queueBuilt) {
-    await buildQueue();
+  try {
+    if (!queueBuilt) await buildQueue(generation);
+    if (generation !== batchGeneration) return;
+    if (queue.length === 0) {
+      state.running = false;
+      notify();
+      return;
+    }
+    launchNext(generation);
+  } catch (error) {
+    if (generation === batchGeneration) {
+      state.running = false;
+      state.error = error instanceof Error ? error.message : String(error);
+      notify();
+    }
+    throw error;
   }
-
-  if (queue.length === 0) {
-    state.running = false;
-    notify();
-    return;
-  }
-
-  void processNext();
 }
 
 /**
@@ -523,42 +578,53 @@ export async function processSelectedItems(
   if (state.running) return;
   if (attachmentIds.length === 0) return;
 
-  // Build a queue from the selected IDs. Manager-confirmed selections can
-  // override parse filters; bulk/filter actions should keep them.
-  queue = [];
-  const filenameMatcher =
-    options.filenameMatcher || buildMineruFilenameMatcher();
-  for (const attId of attachmentIds) {
-    const pdfItem = Zotero.Items.get(attId);
-    if (!pdfItem) continue;
-    const parentId = pdfItem.parentID;
-    const parentItem = parentId ? Zotero.Items.get(parentId) : null;
-    const eligibility = await getMineruParseEligibility(parentItem, pdfItem, {
-      filenameMatcher,
-    });
-    if (eligibility.excluded && !options.overrideEligibility) continue;
-    const title = parentItem?.getField?.("title") || `Item ${attId}`;
-    queue.push({
-      parentItemId: parentId || attId,
-      attachmentId: attId,
-      title,
-      overrideEligibility: options.overrideEligibility === true,
-    });
-  }
-
-  queueBuilt = true;
+  // Claim before the first eligibility await, just like Start All.
+  const generation = ++batchGeneration;
+  state.running = true;
   state.paused = false;
   state.rateLimited = false;
   state.error = null;
-  state.running = true;
-  state.totalCount = queue.length;
-  state.processedCount = 0;
-  state.failedCount = 0;
-  state.lastFailedMessage = null;
-  state.lastFailedItemId = null;
   notify();
+  const selectedQueue: QueueEntry[] = [];
+  try {
+    const filenameMatcher =
+      options.filenameMatcher || buildMineruFilenameMatcher();
+    for (const attId of new Set(attachmentIds)) {
+      const pdfItem = Zotero.Items.get(attId);
+      if (!pdfItem) continue;
+      const parentId = pdfItem.parentID;
+      const parentItem = parentId ? Zotero.Items.get(parentId) : null;
+      const eligibility = await getMineruParseEligibility(parentItem, pdfItem, {
+        filenameMatcher,
+      });
+      if (generation !== batchGeneration) return;
+      if (eligibility.excluded && !options.overrideEligibility) continue;
+      const title = parentItem?.getField?.("title") || `Item ${attId}`;
+      selectedQueue.push({
+        parentItemId: parentId || attId,
+        attachmentId: attId,
+        title,
+        overrideEligibility: options.overrideEligibility === true,
+      });
+    }
 
-  void processNext();
+    queue = selectedQueue;
+    queueBuilt = true;
+    state.totalCount = queue.length;
+    state.processedCount = 0;
+    state.failedCount = 0;
+    state.lastFailedMessage = null;
+    state.lastFailedItemId = null;
+    notify();
+    launchNext(generation);
+  } catch (error) {
+    if (generation === batchGeneration) {
+      state.running = false;
+      state.error = error instanceof Error ? error.message : String(error);
+      notify();
+    }
+    throw error;
+  }
 }
 
 export function pauseBatchProcessing(): void {
@@ -571,69 +637,86 @@ export function pauseBatchProcessing(): void {
   notify();
 }
 
-export async function resetBatchQueue(): Promise<void> {
+async function rebuildBatchQueue(cleanup?: () => Promise<void>): Promise<void> {
+  const generation = ++batchGeneration;
+  const previousRebuild = rebuildTask;
+  const previousProcessing = processingTask;
+  if (nextTimer !== null) clearTimeout(nextTimer);
+  nextTimer = null;
+  currentAbort?.abort();
+  currentAbort = null;
+  // Reserve the batch while the retired owner drains its durable writes.
   state.paused = true;
-  state.running = false;
+  state.running = true;
   state.currentItemId = null;
   state.currentItemTitle = "";
+  state.statusMessage = "";
   state.error = null;
   state.rateLimited = false;
   queueBuilt = false;
   queue = [];
   notify();
 
-  // Rebuild queue to get fresh counts
-  await buildQueue();
+  const task = (async () => {
+    // Maintenance is serialized, even if another reset replaces this view.
+    await previousRebuild?.catch(() => undefined);
+    await previousProcessing?.catch(() => undefined);
+    await cleanup?.();
+    if (generation === batchGeneration) await buildQueue(generation);
+  })();
+  rebuildTask = task;
+  try {
+    await task;
+  } catch (error) {
+    if (generation === batchGeneration) {
+      state.error = error instanceof Error ? error.message : String(error);
+    }
+    throw error;
+  } finally {
+    if (rebuildTask === task) rebuildTask = null;
+    if (generation === batchGeneration) {
+      state.running = false;
+      notify();
+    }
+  }
+}
+
+export async function resetBatchQueue(): Promise<void> {
+  await rebuildBatchQueue();
 }
 
 export async function deleteAllMineruCache(): Promise<void> {
-  pauseBatchProcessing();
-  await Promise.all(getAllProcessingIds().map(cancelMineruTaskAndWait));
-
-  const cacheDir = getMineruCacheDir();
-  const IOUtils = (
-    globalThis as unknown as {
-      IOUtils?: {
-        remove?: (
-          p: string,
-          opts?: { recursive?: boolean; ignoreAbsent?: boolean },
-        ) => Promise<void>;
-      };
-    }
-  ).IOUtils;
-  if (IOUtils?.remove) {
-    try {
+  await rebuildBatchQueue(async () => {
+    await Promise.all(getAllProcessingIds().map(cancelMineruTaskAndWait));
+    const cacheDir = getMineruCacheDir();
+    const IOUtils = (
+      globalThis as unknown as {
+        IOUtils?: {
+          remove?: (
+            p: string,
+            opts?: { recursive?: boolean; ignoreAbsent?: boolean },
+          ) => Promise<void>;
+        };
+      }
+    ).IOUtils;
+    if (IOUtils?.remove) {
       await IOUtils.remove(cacheDir, { recursive: true, ignoreAbsent: true });
       await IOUtils.remove(getMineruCheckpointRoot(), {
         recursive: true,
         ignoreAbsent: true,
       });
-    } catch {
-      /* ignore */
     }
-  }
-
-  await cleanSyncedMineruPackages();
-  clearAllStatuses();
-  await resetBatchQueue();
+    await cleanSyncedMineruPackages();
+    clearAllStatuses();
+  });
 }
 
 export async function deleteMineruCacheForItem(itemId: number): Promise<void> {
-  await cancelMineruTaskAndWait(itemId);
-  await deleteMineruCacheArtifactsForAttachment(itemId);
-  clearItemStatus(itemId);
-  // If queue is built, we need to re-add this item to the queue
-  // Simplest approach: reset and rebuild
-  if (queueBuilt) {
-    const wasRunning = state.running;
-    queueBuilt = false;
-    await buildQueue();
-    // Don't auto-resume if it was running — let the user restart
-    if (wasRunning && !state.paused) {
-      state.running = false;
-      notify();
-    }
-  }
+  await rebuildBatchQueue(async () => {
+    await cancelMineruTaskAndWait(itemId);
+    await deleteMineruCacheArtifactsForAttachment(itemId);
+    clearItemStatus(itemId);
+  });
 }
 
 export function onBatchStateChange(

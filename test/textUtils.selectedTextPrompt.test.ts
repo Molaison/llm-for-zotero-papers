@@ -1,8 +1,12 @@
 import { assert } from "chai";
 import {
   buildQuestionWithSelectedTextContexts,
+  DEFAULT_SELECTED_TEXT_PROMPT,
+  resolvePromptText,
   setTokenUsage,
 } from "../src/modules/contextPanel/textUtils";
+import type { SelectedTextContext } from "../src/shared/types";
+import { SELECTED_TEXT_QUESTIONS_INSTRUCTION } from "../src/services/context/selectedTextAnchorFormatting";
 import { initI18n } from "../src/utils/i18n";
 
 describe("textUtils selected text prompt composition", function () {
@@ -68,6 +72,155 @@ describe("textUtils selected text prompt composition", function () {
     assert.include(prompt, "User question:\nUse this for context.");
   });
 
+  it("puts a chip's question under its closing quotes in every prompt shape", function () {
+    const shapes: Array<[SelectedTextContext["source"], string]> = [
+      ["pdf", "Selected text from the PDF reader:"],
+      ["note-edit", "Selected text from the current Zotero note editor"],
+      ["note", "Selected text from a Zotero note:"],
+    ];
+    for (const [source, heading] of shapes) {
+      const prompt = buildQuestionWithSelectedTextContexts(
+        ["Quoted words."],
+        [source],
+        "Composer text",
+        {
+          selectedTextContexts: [
+            { text: "Quoted words.", source, userQuery: "Why this?" },
+          ],
+        },
+      );
+      assert.include(prompt, heading, source);
+      assert.include(
+        prompt,
+        '"""\nQuoted words.\n"""\nQuestion about this text:\nWhy this?',
+        source,
+      );
+      assert.include(prompt, "User question:\nComposer text", source);
+    }
+
+    const multi = buildQuestionWithSelectedTextContexts(
+      ["First quote.", "Second quote."],
+      ["pdf", "model"],
+      "Compare them.",
+      {
+        selectedTextContexts: [
+          { text: "First quote.", source: "pdf", userQuery: "Is it new?" },
+          { text: "Second quote.", source: "model" },
+        ],
+      },
+    );
+    assert.include(
+      multi,
+      'Text Context 1 [source=pdf_reader]:\n"""\nFirst quote.\n"""\nQuestion about this text:\nIs it new?\n\nText Context 2',
+    );
+    assert.include(
+      multi,
+      'Text Context 2 [source=model_response]:\n"""\nSecond quote.\n"""\n\nUser question:\nCompare them.',
+    );
+    assert.equal(multi.split("Question about this text:").length, 2);
+  });
+
+  it("uses the chip questions as the prompt when the composer is empty", function () {
+    const contexts: SelectedTextContext[] = [
+      { text: "First quote.", source: "pdf", userQuery: "First question?" },
+      { text: "Plain quote.", source: "pdf" },
+      { text: "Third quote.", source: "model", userQuery: "Third question?" },
+    ];
+
+    assert.equal(
+      resolvePromptText("  ", "First quote.", false, contexts),
+      "First question?\n\nThird question?",
+    );
+    assert.equal(
+      resolvePromptText("Typed text", "First quote.", false, contexts),
+      "Typed text",
+    );
+    assert.equal(
+      resolvePromptText("", "Plain quote.", false, [contexts[1]!]),
+      DEFAULT_SELECTED_TEXT_PROMPT,
+    );
+    assert.equal(
+      resolvePromptText("", "Plain quote.", false),
+      DEFAULT_SELECTED_TEXT_PROMPT,
+    );
+  });
+
+  it("prints each chip question once when the composer is empty", function () {
+    const count = (haystack: string, needle: string) =>
+      haystack.split(needle).length - 1;
+    const single = (source: SelectedTextContext["source"]) => [
+      { text: "Quoted words.", source, userQuery: "Why this?" },
+    ];
+    const multi: SelectedTextContext[] = [
+      { text: "First quote.", source: "pdf", userQuery: "Is it new?" },
+      { text: "Plain quote.", source: "pdf" },
+      { text: "Third quote.", source: "model", userQuery: "Why here?" },
+    ];
+    const cases: Array<[string, SelectedTextContext[], object]> = [
+      ["pdf", single("pdf"), {}],
+      ["note-edit", single("note-edit"), {}],
+      ["note", single("note"), {}],
+      ["multi", multi, {}],
+      ["webchat", multi, { includeAnchorContext: true }],
+      [
+        "attributed",
+        [
+          {
+            ...single("pdf")[0]!,
+            paperContext: { itemId: 1, contextItemId: 2, title: "Paper" },
+          },
+        ],
+        { includePaperAttribution: true },
+      ],
+    ];
+    for (const [label, contexts, options] of cases) {
+      const promptText = resolvePromptText(
+        "",
+        contexts[0]!.text,
+        false,
+        contexts,
+      );
+      const prompt = buildQuestionWithSelectedTextContexts(
+        contexts.map((context) => context.text),
+        contexts.map((context) => context.source),
+        promptText,
+        {
+          selectedTextContexts: contexts,
+          selectedTextPaperContexts: contexts.map(
+            (context) => context.paperContext,
+          ),
+          ...options,
+        },
+      );
+      for (const context of contexts) {
+        if (!context.userQuery) continue;
+        assert.equal(count(prompt, context.userQuery), 1, label);
+        assert.include(
+          prompt,
+          `"""\n${context.text}\n"""\nQuestion about this text:\n${context.userQuery}`,
+          label,
+        );
+      }
+      assert.notInclude(prompt, "User question:", label);
+      assert.equal(
+        count(prompt, SELECTED_TEXT_QUESTIONS_INSTRUCTION),
+        1,
+        label,
+      );
+    }
+
+    // Typed composer text keeps its "User question:" block.
+    const typed = buildQuestionWithSelectedTextContexts(
+      ["Quoted words."],
+      ["note"],
+      "Composer text",
+      { selectedTextContexts: single("note") },
+    );
+    assert.equal(count(typed, "Why this?"), 1);
+    assert.include(typed, "User question:\nComposer text");
+    assert.notInclude(typed, SELECTED_TEXT_QUESTIONS_INSTRUCTION);
+  });
+
   it("labels token usage as estimated active context pressure", function () {
     const tokenEl = {
       textContent: "",
@@ -92,6 +245,25 @@ describe("textUtils selected text prompt composition", function () {
     assert.equal(gaugeEl.style.display, "inline-block");
     assert.include(gaugeEl.style.background, "324deg");
     assert.equal(gaugeEl.dataset.warning, "true");
+  });
+
+  it("adds a cache hit line to the hover only when the provider reported cache data", function () {
+    const tokenEl = {
+      textContent: "",
+      title: "",
+      dataset: {} as Record<string, string>,
+      style: { display: "" },
+    } as unknown as HTMLElement;
+
+    setTokenUsage(tokenEl, 40_000, 1_000_000, null, { cacheHitRatio: 0.724 });
+    assert.equal(tokenEl.dataset.cache, "Cache hit 72%");
+
+    setTokenUsage(tokenEl, 40_000, 1_000_000, null, {});
+    assert.isUndefined(tokenEl.dataset.cache);
+
+    // No usage measured yet: the hover asks for a message, with no cache line.
+    setTokenUsage(tokenEl, 0, undefined, null, { cacheHitRatio: 0.5 });
+    assert.isUndefined(tokenEl.dataset.cache);
   });
 
   it("uses one localized unavailable presentation for tooltip and accessibility", function () {

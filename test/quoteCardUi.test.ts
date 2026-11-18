@@ -264,9 +264,10 @@ describe("quote card UI contract", function () {
   });
 
   it("renders completed quote-card bodies lazily through the markdown renderer", function () {
-    const renderSource = source(
-      "src/modules/contextPanel/assistantCitationLinks.ts",
-    );
+    // The body renderer is shared with Task progress's cited passages.
+    const renderSource =
+      source("src/modules/contextPanel/assistantCitationLinks.ts") +
+      source("src/modules/contextPanel/quoteCardMarkdown.ts");
 
     assert.include(renderSource, "renderQuoteCardBodyMarkdown");
     assert.include(renderSource, "renderRenderedMarkdownInto(container");
@@ -405,13 +406,13 @@ describe("quote card UI contract", function () {
     const previewRendererStart = markdownSource.indexOf(
       "export function renderRenderedMathPreviewInto",
     );
-    const fullRendererStart = markdownSource.indexOf(
-      "export function renderRenderedMarkdownInto",
-      previewRendererStart,
+    const nextFunctionStart = markdownSource.indexOf(
+      "export function ",
+      previewRendererStart + 1,
     );
     const previewRenderer = markdownSource.slice(
       previewRendererStart,
-      fullRendererStart,
+      nextFunctionStart,
     );
     assert.include(previewRenderer, "setRenderedMarkdownHtml");
     assert.notInclude(previewRenderer, "attachRenderedCodeBlockControls");
@@ -616,9 +617,24 @@ describe("quote card UI contract", function () {
     assert.isAbove(untrustedEnd, untrustedStart);
     assert.include(untrustedBranch, 'status: "unresolved"');
     assert.include(untrustedBranch, "interactive: true");
-    assert.include(
-      renderSource,
-      "Source match incomplete; click to search the paper.",
+    assert.notInclude(untrustedBranch, "quoteCitationId");
+    const tooltipStart = renderSource.indexOf(
+      "function unresolvedQuoteCardTooltip",
+    );
+    const tooltipFn = renderSource.slice(
+      tooltipStart,
+      renderSource.indexOf("function createQuoteCardElement", tooltipStart),
+    );
+    assert.isAtLeast(tooltipStart, 0);
+    // Only a card with a minted record (quoteCitationId) claims a match.
+    assert.match(
+      tooltipFn,
+      /if \(params\.quoteCitationId\) \{[\s\S]*Found in the paper; click to locate it in the PDF\.[\s\S]*Found in the paper\.[\s\S]*\}[\s\S]*Source match incomplete; click to search the paper\.[\s\S]*Source match incomplete\./,
+    );
+    assert.include(renderSource, "unresolvedQuoteCardTooltip(params)");
+    assert.notInclude(
+      renderSource.replace(tooltipFn, ""),
+      "Found in the paper",
     );
   });
 

@@ -536,6 +536,9 @@ export async function pollForResponse(
         if (match.error) throw new Error(match.error);
         return buildTerminalResult(match, data);
       }
+      if (data.current_seq > seq) {
+        throw new Error("Webchat query was superseded by a newer query.");
+      }
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       continue;
     }

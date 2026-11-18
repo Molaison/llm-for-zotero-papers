@@ -1,5 +1,7 @@
 import { assert } from "chai";
 import {
+  buildChunkIndex,
+  buildChunkMetadata,
   buildPaperRetrievalCandidates,
   selectStructuredCandidates,
 } from "../src/services/paperContent/pdfContext";
@@ -485,7 +487,47 @@ describe("bounded section prior", function () {
     );
   });
 
-  it("demotes references, captions and short chunks to the end", async function () {
+  it("returns a body passage that sits behind a figure caption", async function () {
+    // PDF text runs a caption straight into the body paragraph after it, so a
+    // chunk that starts "Figure 2:" is classified as a caption while holding
+    // the answer. Demoting it skipped the top-ranked passage (SEVA, "3700
+    // sentences"); a replay over QASPER-200 found more gold evidence with no
+    // caption demotion at all.
+    const chunks = [
+      "We collect simplification pairs from news articles written for two reading levels. Each article is aligned at the paragraph level before sentence alignment.",
+      "The annotators read every aligned paragraph and mark the sentences that keep the original meaning while using simpler words and shorter clauses.",
+      "We compare the systems with automatic metrics and a small human study, reporting fluency, adequacy and simplicity on a five point scale.",
+      "Figure 2: Distribution of sentence lengths in the corpus.\nThe final corpus contains 3700 sentences that were simplified by trained annotators, split into training, development and test portions.",
+    ];
+    const chunkMeta = buildChunkMetadata(chunks, "zotero-worker");
+    // Flat PDF text has no manifest, so the kind is the text heuristic's.
+    assert.equal(chunkMeta[3].chunkKind, "figure-caption");
+    assert.notEqual(chunkMeta[3].kindSource, "manifest");
+    const context: PdfContext = {
+      title: "Structure Paper",
+      chunks,
+      chunkMeta,
+      ...buildChunkIndex(chunks),
+      fullLength: chunks.join("\n\n").length,
+      sourceType: "zotero-worker",
+    };
+
+    const candidates = await buildPaperRetrievalCandidates(
+      PAPER,
+      context,
+      "how many sentences does the corpus contain",
+      undefined,
+      { topK: 3, mode: "evidence", disableEmbeddings: true },
+    );
+
+    assert.include(indexesOf(candidates), 3);
+    const captionLed = candidates.find(
+      (candidate) => candidate.chunkIndex === 3,
+    );
+    assert.notEqual(captionLed?.why?.demoted, true);
+  });
+
+  it("demotes references and short chunks to the end, never captions", async function () {
     const context = buildStructuredContext([
       {
         text: `Gamma delta epsilon are analysed in the reference list below. ${LONG_BODY}`,
@@ -515,6 +557,20 @@ describe("bounded section prior", function () {
         sectionIndex: 3,
         sectionLabel: "2.2 Kinematic condition",
       },
+      {
+        text: `Appendix A: gamma delta epsilon on the coarse grid. ${LONG_BODY}`,
+        chunkKind: "appendix",
+        kindSource: "heuristic",
+        sectionIndex: 4,
+        sectionLabel: "Appendix A",
+      },
+      {
+        text: `Table 3: gamma delta epsilon for each mesh. ${LONG_BODY}`,
+        chunkKind: "table-caption",
+        kindSource: "manifest",
+        sectionIndex: 5,
+        sectionLabel: "5 Results",
+      },
     ]);
 
     const candidates = await buildPaperRetrievalCandidates(
@@ -522,13 +578,23 @@ describe("bounded section prior", function () {
       context,
       "gamma delta epsilon",
       undefined,
-      { topK: 4, mode: "evidence", disableEmbeddings: true },
+      { topK: 6, mode: "evidence", disableEmbeddings: true },
     );
 
     const order = indexesOf(candidates);
-    assert.equal(order[0], 3, "the body chunk leads");
-    assert.sameMembers(order.slice(1), [0, 1, 2]);
-    for (const chunkIndex of [0, 1, 2]) {
+    assert.sameMembers(
+      order.slice(0, 4),
+      [1, 3, 4, 5],
+      "body, caption and appendix chunks rank on relevance alone",
+    );
+    assert.sameMembers(order.slice(4), [0, 2]);
+    for (const chunkIndex of [1, 4, 5]) {
+      const kept = candidates.find(
+        (candidate) => candidate.chunkIndex === chunkIndex,
+      );
+      assert.notEqual(kept?.why?.demoted, true, `chunk ${chunkIndex}`);
+    }
+    for (const chunkIndex of [0, 2]) {
       const demoted = candidates.find(
         (candidate) => candidate.chunkIndex === chunkIndex,
       );
@@ -691,6 +757,33 @@ describe("structure stage on the math fixture", function () {
       out.every((candidate) => typeof candidate.why?.bm25Rank === "number"),
     );
     assert.notEqual(out[0].chunkKind, "conclusion");
+  });
+
+  it("keeps a chunk-index scope: only those chunks, never the whole document", async function () {
+    const ctx = await buildFixturePdfContext("mathDoubleHash", 9203);
+    const paperRef: PaperContextRef = {
+      itemId: 103,
+      contextItemId: 9203,
+      title: "Mock",
+      firstCreator: "Tester",
+      year: "2026",
+    };
+    const plan = buildRetrievalQueryPlan({
+      query: "kinematic relation between film height and normal speed",
+    });
+    const read = (chunkIndexes: number[]) =>
+      buildPaperRetrievalCandidates(
+        paperRef,
+        ctx,
+        plan.originalQuery,
+        { queryPlan: plan },
+        { topK: 8, mode: "evidence", queryPlan: plan, chunkIndexes },
+      );
+    const scoped = await read([1, 3]);
+    assert.isNotEmpty(scoped);
+    for (const candidate of scoped)
+      assert.include([1, 3], candidate.chunkIndex);
+    assert.isEmpty(await read([99_999]), "an empty scope never widens");
   });
 
   it("returns nothing for a requested section that holds no passages", async function () {

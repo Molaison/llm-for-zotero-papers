@@ -1,3 +1,13 @@
+import {
+  listAnnotationReplyCandidates,
+  runAnnotationReplies,
+} from "../src/services/pdf/annotationReplyService";
+import {
+  loadAnnotationReplyBatch,
+  loadAnnotationReplyBatches,
+  getAnnotationReplyClaims,
+} from "../src/utils/annotationReplyStore";
+import { installAnnotationReplyTestDB } from "./helpers/annotationReplyDb";
 import { createNoteConversationItem } from "../src/services/notes/conversationItem";
 import { getConversationKey } from "../src/modules/contextPanel/conversationIdentity";
 import {
@@ -7,6 +17,7 @@ import {
 } from "../src/modules/contextPanel/state";
 import { assert } from "chai";
 import type {
+  AttachedConversationRef,
   ChatAttachment,
   CollectionContextRef,
   Message,
@@ -27,7 +38,10 @@ import { createSendFlowController } from "../src/modules/contextPanel/setupHandl
 import { FULL_PDF_UNSUPPORTED_MESSAGE } from "../src/modules/contextPanel/pdfSupportMessages";
 import { setUserSkills, type AgentSkill } from "../src/agent/skills";
 import type { LocalDocumentResource } from "../src/shared/types";
-import { resolvePromptText as resolveProductionPromptText } from "../src/modules/contextPanel/textUtils";
+import {
+  buildQuestionWithSelectedTextContexts as buildProductionQuestionWithSelectedTextContexts,
+  resolvePromptText as resolveProductionPromptText,
+} from "../src/modules/contextPanel/textUtils";
 import { createPaperPortalItem } from "../src/modules/contextPanel/portalScope";
 import { buildTurnPaperScope } from "../src/agent/context/turnPaperScope";
 import {
@@ -64,8 +78,277 @@ describe("sendFlowController", function () {
     libraryID: 1,
   };
 
+  const attachedChat: AttachedConversationRef = {
+    system: "codex",
+    conversationKey: 1_500_000_777,
+    conversationID: "codex-1",
+    title: "Earlier chat",
+    libraryID: 1,
+  };
+
   afterEach(function () {
     setUserSkills([]);
+  });
+
+  async function annotationFixture() {
+    const env = installAnnotationReplyTestDB();
+    env.attachment(1);
+    env.annotation(12, 1, "Why this result?");
+    const targets = (await listAnnotationReplyCandidates([1])).map(
+      (c) => c.target!,
+    );
+    const pages = [
+      {
+        attachmentID: 1,
+        pageIndex: 0,
+        dataURL: "data:image/png;base64,AA==",
+        context: "source page",
+      },
+    ];
+    const batch = {
+      id: "",
+      protocol: "zotero-annotation-replies/v1",
+      targets,
+      pages,
+    } as any;
+    return {
+      env,
+      batch,
+      hooks: {
+        hasSelection: () => true,
+        run: async (key, options, send) =>
+          runAnnotationReplies(
+            {
+              ...options,
+              selection: targets,
+              conversationKey: key,
+              preparedPages: pages,
+            },
+            async (packet) => {
+              Object.assign(
+                batch,
+                await loadAnnotationReplyBatch(packet.batchId),
+              );
+              return send(packet);
+            },
+          ),
+      },
+    };
+  }
+
+  it("annotation compose passes exact images, hidden protocol and durable marker; dispatch stays uncertain", async function () {
+    const { env, batch, hooks } = await annotationFixture();
+    try {
+      let sent: any;
+      const h = createBaseDeps({
+        annotationReplies: hooks,
+        sendQuestion: async (opts: any) => {
+          sent = opts;
+          opts.onProviderDispatch();
+        },
+      });
+      await h.controller.doSend();
+      assert.include(sent.images, batch.pages[0].dataURL);
+      assert.include(sent.question, batch.protocol);
+      assert.include(sent.question, batch.targets[0].identity);
+      assert.include(
+        sent.displayQuestion,
+        `[Zotero annotation batch: ${batch.id}]`,
+      );
+      assert.notInclude(sent.displayQuestion, batch.protocol);
+      assert.equal(sent.annotationReplyBatchId, batch.id);
+      assert.isFunction(sent.onAnnotationReplyComplete);
+      assert.equal(env.saves(), 0);
+      assert.equal(
+        (await loadAnnotationReplyBatch(batch.id)).status,
+        "uncertain",
+      );
+    } finally {
+      await env.restore();
+    }
+  });
+  for (const complete of [false, true]) {
+    it(`annotation completion callback writes only a complete final answer: ${complete}`, async function () {
+      const { env, batch, hooks } = await annotationFixture();
+      try {
+        let raw: string;
+        const h = createBaseDeps({
+          annotationReplies: hooks,
+          sendQuestion: async (opts: any) => {
+            opts.onProviderDispatch();
+            raw = JSON.stringify({
+              protocol: batch.protocol,
+              batchId: batch.id,
+              replies: batch.targets.map((t) => ({
+                identity: t.identity,
+                version: t.version,
+                answer: "Final complete answer",
+              })),
+            });
+
+            await opts.onAnnotationReplyComplete(raw, complete);
+          },
+        });
+        let error: unknown;
+        try {
+          await h.controller.doSend();
+        } catch (caught) {
+          error = caught;
+        }
+        assert.equal(env.saves(), complete ? 1 : 0);
+        const saved = await loadAnnotationReplyBatch(batch.id);
+        assert.equal(saved.status, complete ? "applied" : "uncertain");
+        if (complete) {
+          assert.isUndefined(error);
+          assert.equal(saved.rawAnswer, raw);
+        } else {
+          assert.instanceOf(error, Error);
+          assert.isUndefined(saved.rawAnswer);
+        }
+      } finally {
+        await env.restore();
+      }
+    });
+  }
+  it("annotation armed handoff failure stays uncertain without provider notification and retains claims", async function () {
+    const { env, batch, hooks } = await annotationFixture();
+    let providerNotifications = 0;
+    try {
+      const h = createBaseDeps({
+        annotationReplies: hooks,
+        sendQuestion: async (opts) => {
+          const notify = opts.onProviderDispatch;
+          opts.onProviderDispatch = () => {
+            providerNotifications++;
+            notify();
+          };
+          throw new Error("preflight failed");
+        },
+      });
+      try {
+        await h.controller.doSend();
+        assert.fail("must reject");
+      } catch (error) {
+        assert.include(String(error), "preflight failed");
+      }
+      assert.equal(providerNotifications, 0);
+      assert.equal(
+        (await loadAnnotationReplyBatch(batch.id)).status,
+        "uncertain",
+      );
+      assert.isString((await listAnnotationReplyCandidates([1]))[0].blocked);
+      assert.deepEqual(
+        await getAnnotationReplyClaims(batch.targets[0].identity),
+        [
+          {
+            version: batch.targets[0].version,
+            batch_id: batch.id,
+            generated_block: null,
+          },
+        ],
+      );
+      let duplicateError: unknown;
+      try {
+        await runAnnotationReplies(
+          {
+            selection: batch.targets,
+            conversationKey: 102,
+            preparedPages: batch.pages,
+            signal: new AbortController().signal,
+            isActive: () => true,
+            imageBudget: 9,
+          },
+          async () => {
+            assert.fail("duplicate must not dispatch");
+          },
+        );
+      } catch (error) {
+        duplicateError = error;
+      }
+      assert.include(String(duplicateError), "不会重复发送");
+    } finally {
+      await env.restore();
+    }
+  });
+  for (const override of [
+    { isScreenshotUnsupportedModel: () => true },
+    { isAgentMode: () => true },
+    { isClaudeConversationSystem: () => true },
+    { isCodexConversationSystem: () => true },
+    { getSelectedProfile: () => ({ authMode: "webchat" }) },
+    { getSelectedProfile: () => ({ authMode: "codex_app_server" }) },
+    { getActiveEditSession: () => ({ conversationKey: 101 }) },
+  ]) {
+    it(`annotation mode preflight blocks before preparation: ${Object.keys(override)[0]} ${String(Object.values(override)[0])}`, async function () {
+      let prepared = 0;
+      const h = createBaseDeps({
+        ...override,
+        annotationReplies: {
+          hasSelection: () => true,
+          run: async () => {
+            prepared++;
+          },
+        },
+      });
+      await h.controller.doSend();
+      assert.equal(prepared, 0);
+      assert.equal(h.getCounts().sendCalled, 0);
+    });
+  }
+  it("annotation-only input can send without a typed question or other context", async function () {
+    const { env, hooks } = await annotationFixture();
+    try {
+      const h = createBaseDeps({
+        annotationReplies: hooks,
+        getSelectedTextContextEntries: () => [],
+        getSelectedImages: () => [],
+        getSelectedFiles: () => [],
+        getSelectedPaperContexts: () => [],
+        resolvePromptText: () => "",
+      });
+      h.inputBox.value = "";
+      await h.controller.doSend();
+      assert.equal(h.getCounts().sendCalled, 1);
+    } finally {
+      await env.restore();
+    }
+  });
+  it("annotation Papers limit rejects before reserve without truncation or dispatch", async function () {
+    const { env, batch, hooks } = await annotationFixture();
+    try {
+      const images = Array.from({ length: 9 }, (_, i) => `image-${i}`);
+      const selectedTargets = JSON.parse(JSON.stringify(batch.targets));
+      const beforeBatches = await loadAnnotationReplyBatches();
+      const beforeClaims = await getAnnotationReplyClaims(
+        batch.targets[0].identity,
+      );
+      const h = createBaseDeps({
+        annotationReplies: hooks,
+        getSelectedImages: () => images,
+        getSelectedProfile: () => ({ paperRegistry: true, directWebPdf: true }),
+      });
+      let error: unknown;
+      try {
+        await h.controller.doSend();
+      } catch (caught) {
+        error = caught;
+      }
+      assert.include(String(error), "不会静默裁剪");
+      assert.equal(h.getCounts().sendCalled, 0);
+      assert.deepEqual(await loadAnnotationReplyBatches(), beforeBatches);
+      assert.deepEqual(
+        await getAnnotationReplyClaims(batch.targets[0].identity),
+        beforeClaims,
+      );
+      assert.deepEqual(
+        images,
+        Array.from({ length: 9 }, (_, i) => `image-${i}`),
+      );
+      assert.deepEqual(batch.targets, selectedTargets);
+      assert.isTrue(hooks.hasSelection());
+    } finally {
+      await env.restore();
+    }
   });
 
   function makeTestSkill(
@@ -613,6 +896,9 @@ describe("sendFlowController", function () {
     let lastSentTagContexts: TagContextRef[] | undefined;
     let lastEditCollectionContexts: CollectionContextRef[] | undefined;
     let lastEditTagContexts: TagContextRef[] | undefined;
+    let lastSentAttachedConversations: AttachedConversationRef[] | undefined;
+    let lastEditAttachedConversations: AttachedConversationRef[] | undefined;
+    const clearedAttachedConversationOwners: number[] = [];
     let lastStatus: { message: string; level: string } | null = null;
     const statuses: Array<{ message: string; level: string }> = [];
     let activeRequestId = 0;
@@ -658,6 +944,10 @@ describe("sendFlowController", function () {
       getSelectedPaperContexts: () => [selectedPaper],
       getSelectedCollectionContexts: () => [],
       getSelectedTagContexts: () => [],
+      getAttachedConversations: () => [],
+      clearAttachedConversations: (ownerId: number) => {
+        clearedAttachedConversationOwners.push(ownerId);
+      },
       getFullTextPaperContexts: () => [selectedPaper],
       getPdfModePaperContexts: () => [],
       resolvePaperContextNextSendMode: () => "full-next" as const,
@@ -718,6 +1008,7 @@ describe("sendFlowController", function () {
         lastEditPdfUploadSystemMessages = opts.pdfUploadSystemMessages;
         lastEditCollectionContexts = opts.selectedCollectionContexts;
         lastEditTagContexts = opts.selectedTagContexts;
+        lastEditAttachedConversations = opts.attachedConversations;
         lastEditContextSource = opts.contextSource;
         activeRequestId = 0;
         activeAbortController = null;
@@ -738,6 +1029,7 @@ describe("sendFlowController", function () {
         lastSentForcedSkillIds = opts.forcedSkillIds;
         lastSentCollectionContexts = opts.selectedCollectionContexts;
         lastSentTagContexts = opts.selectedTagContexts;
+        lastSentAttachedConversations = opts.attachedConversations;
         lastSentContextSource = opts.contextSource;
         lastSentPdfPaperContexts = opts.pdfPaperContexts;
         lastSentWebchatSendPdf = opts.webchatSendPdf === true;
@@ -816,6 +1108,7 @@ describe("sendFlowController", function () {
         lastSentForcedSkillIds,
         lastSentCollectionContexts,
         lastSentTagContexts,
+        lastSentAttachedConversations,
         lastSentContextSource,
         lastSentPdfPaperContexts,
         lastSentWebchatSendPdf,
@@ -830,6 +1123,9 @@ describe("sendFlowController", function () {
       getLastEditPdfUploadSystemMessages: () => lastEditPdfUploadSystemMessages,
       getLastEditCollectionContexts: () => lastEditCollectionContexts,
       getLastEditTagContexts: () => lastEditTagContexts,
+      getLastEditAttachedConversations: () => lastEditAttachedConversations,
+      getClearedAttachedConversationOwners: () =>
+        clearedAttachedConversationOwners.slice(),
       getLastEditContextSource: () => lastEditContextSource,
       getLastStatus: () => lastStatus,
       getStatuses: () => statuses.slice(),
@@ -1216,6 +1512,40 @@ describe("sendFlowController", function () {
     assert.deepEqual(sentOptions.resolvedSelectedTextAnchors, [anchor]);
   });
 
+  it("sends the chip question, not the default prompt, when the composer is empty", async function () {
+    const context: SelectedTextContext = {
+      text: "A quoted sentence.",
+      source: "model",
+      userQuery: "What does this imply?",
+    };
+    const { controller, inputBox, getLastSend } = createBaseDeps({
+      getSelectedTextContextEntries: () => [context],
+      getSelectedPaperContexts: () => [],
+      getSelectedCollectionContexts: () => [],
+      getFullTextPaperContexts: () => [],
+      getSelectedFiles: () => [],
+      getSelectedImages: () => [],
+      resolvePromptText: resolveProductionPromptText,
+      buildQuestionWithSelectedTextContexts:
+        buildProductionQuestionWithSelectedTextContexts,
+      buildModelPromptWithFileContext: (question: string) => question,
+    });
+    inputBox.value = "";
+
+    await controller.doSend();
+
+    const { lastSentQuestion, lastSentDisplayQuestion } = getLastSend();
+    assert.include(
+      lastSentQuestion,
+      '"""\nA quoted sentence.\n"""\nQuestion about this text:\nWhat does this imply?',
+    );
+    // The question follows its quote once; it is not repeated at the end.
+    assert.notInclude(lastSentQuestion, "User question:");
+    assert.equal(lastSentQuestion.split("What does this imply?").length - 1, 1);
+    assert.notInclude(lastSentQuestion, "Please explain this selected text.");
+    assert.equal(lastSentDisplayQuestion, "What does this imply?");
+  });
+
   it("passes input mode to the screenshot gate and omits images for text-only mode", async function () {
     let screenshotGateArgs:
       | {
@@ -1412,6 +1742,130 @@ describe("sendFlowController", function () {
     assert.equal(getCounts().persistDraftInputCalls, 0);
     assert.equal(getCounts().composerDraftClearedCalls, 0);
     assert.equal(restoreCalls, 0);
+  });
+
+  it("restores a preserved-draft send refused before dispatch", async function () {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["no item", { getItem: () => null }],
+      ["ownership refused", { requireCurrentOwnership: () => false }],
+    ];
+    for (const [label, overrides] of cases) {
+      let restoreCalls = 0;
+      const { controller, inputBox, getCounts } = createBaseDeps(overrides);
+      inputBox.value = "draft";
+      await controller.doSend({
+        overrideText: "queued follow-up",
+        preserveInputDraft: true,
+        restoreQueuedInput: () => {
+          restoreCalls += 1;
+        },
+      });
+      assert.equal(restoreCalls, 1, label);
+      assert.equal(inputBox.value, "draft", label);
+      assert.equal(getCounts().sendCalled, 0, label);
+    }
+  });
+
+  it("queues a busy preserved-draft send without touching the composer", async function () {
+    const queued: Array<{ text: string; options: unknown }> = [];
+    let restoreCalls = 0;
+    const { controller, inputBox, getCounts } = createBaseDeps({
+      beginRequest: () => null,
+      queueFollowUpInput: (text: string, options: unknown) => {
+        queued.push({ text, options });
+        return true;
+      },
+    });
+    inputBox.value = "draft typed while waiting";
+
+    await controller.doSend({
+      overrideText: "queued follow-up",
+      preserveInputDraft: true,
+      restoreQueuedInput: () => {
+        restoreCalls += 1;
+      },
+    });
+
+    assert.deepEqual(queued, [
+      { text: "queued follow-up", options: { preserveInputDraft: true } },
+    ]);
+    assert.equal(inputBox.value, "draft typed while waiting");
+    assert.equal(getCounts().persistDraftInputCalls, 0);
+    assert.equal(restoreCalls, 0);
+    assert.equal(getCounts().sendCalled, 0);
+  });
+
+  it("restores a busy preserved-draft send that the queue refused", async function () {
+    let restoreCalls = 0;
+    const { controller, inputBox } = createBaseDeps({
+      beginRequest: () => null,
+      // No queue thread key: the queue drops the text and reports false.
+      queueFollowUpInput: () => false,
+    });
+    inputBox.value = "draft";
+
+    await controller.doSend({
+      overrideText: "queued follow-up",
+      preserveInputDraft: true,
+      restoreQueuedInput: () => {
+        restoreCalls += 1;
+      },
+    });
+
+    assert.equal(restoreCalls, 1);
+    assert.equal(inputBox.value, "draft");
+  });
+
+  it("queues a busy composer send with the default clearing behavior", async function () {
+    const queued: Array<{ text: string; options: unknown }> = [];
+    const { controller } = createBaseDeps({
+      beginRequest: () => null,
+      queueFollowUpInput: (text: string, options: unknown) => {
+        queued.push({ text, options });
+        return true;
+      },
+    });
+
+    await controller.doSend();
+
+    assert.deepEqual(queued, [
+      { text: "ask question", options: { preserveInputDraft: false } },
+    ]);
+  });
+
+  it("sends a preserved-draft prompt as a new turn even while an edit is open", async function () {
+    const { controller, getCounts, getLastSend } = createBaseDeps({
+      getSelectedTextContextEntries: () => [],
+      getSelectedPaperContexts: () => [],
+      getSelectedCollectionContexts: () => [],
+      getFullTextPaperContexts: () => [],
+      getSelectedFiles: () => [],
+      getSelectedImages: () => [],
+      resolvePromptText: resolveProductionPromptText,
+      buildModelPromptWithFileContext: (question: string) => question,
+      getActiveEditSession: () => ({
+        conversationKey: item.id,
+        userTimestamp: 10,
+        assistantTimestamp: 20,
+      }),
+      getLatestEditablePair: async () => ({
+        conversationKey: item.id,
+        pair: {
+          userMessage: { timestamp: 10 },
+          assistantMessage: { timestamp: 20, streaming: false },
+        },
+      }),
+    });
+
+    await controller.doSend({
+      overrideText: "queued follow-up",
+      preserveInputDraft: true,
+      restoreQueuedInput: () => undefined,
+    });
+
+    assert.equal(getCounts().editCalled, 0);
+    assert.equal(getCounts().sendCalled, 1);
+    assert.equal(getLastSend().lastSentQuestion, "queued follow-up");
   });
 
   it("uses retain-pinned callbacks for edit-latest flow", async function () {
@@ -2200,6 +2654,103 @@ describe("sendFlowController", function () {
 
     assert.equal(getLastSend().lastRuntimeMode, "chat");
     assert.deepEqual(getLastSend().lastSentTagContexts, [selectedTag]);
+  });
+
+  it("sends attached past chats with the message and clears them from the composer", async function () {
+    const { controller, getLastSend, getClearedAttachedConversationOwners } =
+      createBaseDeps({
+        getAttachedConversations: () => [attachedChat],
+      });
+
+    await controller.doSend();
+
+    assert.deepEqual(getLastSend().lastSentAttachedConversations, [
+      attachedChat,
+    ]);
+    assert.deepEqual(getClearedAttachedConversationOwners(), [item.id]);
+  });
+
+  it("does not clear the composer past chats when there are none", async function () {
+    const { controller, getLastSend, getClearedAttachedConversationOwners } =
+      createBaseDeps();
+
+    await controller.doSend();
+
+    assert.isUndefined(getLastSend().lastSentAttachedConversations);
+    assert.deepEqual(getClearedAttachedConversationOwners(), []);
+  });
+
+  it("counts an attached past chat as content for an otherwise empty send", async function () {
+    const emptyContext = {
+      getSelectedTextContextEntries: () => [],
+      getSelectedPaperContexts: () => [],
+      getFullTextPaperContexts: () => [],
+      getSelectedFiles: () => [],
+      getSelectedImages: () => [],
+      resolvePromptText: resolveProductionPromptText,
+    };
+    const empty = createBaseDeps({
+      ...emptyContext,
+      getAttachedConversations: () => [],
+    });
+    empty.inputBox.value = "";
+    await empty.controller.doSend();
+    assert.equal(empty.getCounts().sendCalled, 0);
+
+    const withChat = createBaseDeps({
+      ...emptyContext,
+      getAttachedConversations: () => [attachedChat],
+    });
+    withChat.inputBox.value = "";
+    await withChat.controller.doSend();
+    assert.equal(withChat.getCounts().sendCalled, 1);
+    assert.deepEqual(withChat.getLastSend().lastSentAttachedConversations, [
+      attachedChat,
+    ]);
+  });
+
+  it("passes attached past chats through latest-turn edit retries", async function () {
+    const { controller, getLastEditAttachedConversations } = createBaseDeps({
+      getAttachedConversations: () => [attachedChat],
+      getActiveEditSession: () => ({
+        conversationKey: item.id,
+        userTimestamp: 10,
+        assistantTimestamp: 20,
+      }),
+      getLatestEditablePair: async () => ({
+        conversationKey: item.id,
+        pair: {
+          userMessage: { timestamp: 10 },
+          assistantMessage: { timestamp: 20, streaming: false },
+        },
+      }),
+    });
+
+    await controller.doSend();
+
+    assert.deepEqual(getLastEditAttachedConversations(), [attachedChat]);
+  });
+
+  it("blocks attached past chats for webchat sends", async function () {
+    const { controller, inputBox, getCounts, getLastStatus } = createBaseDeps({
+      getSelectedProfile: () => ({
+        entryId: "entry-1",
+        model: "chatgpt-web",
+        apiBase: "",
+        apiKey: "",
+        providerLabel: "ChatGPT",
+        authMode: "webchat",
+        providerProtocol: "web_sync",
+      }),
+      getAttachedConversations: () => [attachedChat],
+    });
+
+    await controller.doSend();
+
+    assert.equal(getCounts().sendCalled, 0);
+    assert.equal(getCounts().editCalled, 0);
+    assert.equal(inputBox.value, "ask question");
+    assert.equal(getLastStatus()?.level, "error");
   });
 
   it("passes selected collections through latest-turn edit retries", async function () {

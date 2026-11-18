@@ -2,7 +2,10 @@ import type {
   ResolvedSelectedTextAnchor,
   SelectedTextContext,
 } from "../../shared/types";
-import { normalizePositiveInt } from "./normalizers";
+import {
+  normalizePositiveInt,
+  normalizeSelectedTextUserQuery,
+} from "./normalizers";
 
 function cleanText(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -20,6 +23,49 @@ function cleanText(value: unknown): string {
     cleaned += character;
   }
   return cleaned.trim();
+}
+
+/**
+ * The line placed under a chip's closing quotes when the user attached a
+ * question to it (D3), including its leading newline; "" without a question.
+ */
+export function formatSelectedTextQuestionSuffix(userQuery: unknown): string {
+  const question = normalizeSelectedTextUserQuery(userQuery);
+  return question ? `\nQuestion about this text:\n${question}` : "";
+}
+
+/** The chip questions in chip order, joined by blank lines; "" when none. */
+export function joinSelectedTextQuestions(
+  contexts: readonly Pick<SelectedTextContext, "userQuery">[] | undefined,
+  sanitize?: (value: string) => string,
+): string {
+  return (contexts || [])
+    .map((context) =>
+      normalizeSelectedTextUserQuery(context?.userQuery, sanitize),
+    )
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * Closing line of a model prompt whose user prompt is only the chip
+ * questions (an empty-composer send): each question already follows its own
+ * quote, so the prompt does not repeat them.
+ */
+export const SELECTED_TEXT_QUESTIONS_INSTRUCTION =
+  "Answer the question attached to each selected text above.";
+
+/**
+ * True when `prompt` is exactly the chip questions as joined by
+ * joinSelectedTextQuestions, i.e. resolvePromptText's empty-composer result.
+ */
+export function isPromptOnlySelectedTextQuestions(
+  prompt: string,
+  contexts: readonly Pick<SelectedTextContext, "userQuery">[] | undefined,
+  sanitize?: (value: string) => string,
+): boolean {
+  const questions = joinSelectedTextQuestions(contexts, sanitize);
+  return Boolean(questions) && prompt.trim() === questions;
 }
 
 export function formatSelectedTextLocator(

@@ -8,7 +8,6 @@ import {
   type ProviderProtocol,
 } from "../../utils/providerProtocol";
 import { isGeminiBase } from "../../utils/apiHelpers";
-import { providerSupportsResponsesEndpoint } from "../../utils/providerPresets";
 import type { AgentModelAdapter } from "./adapter";
 import { buildAgentModelCapabilities } from "./contentCapabilities";
 import { CodexResponsesAgentAdapter } from "./codexResponses";
@@ -75,11 +74,8 @@ export function createAgentModelAdapter(
     return new CodexResponsesAgentAdapter();
   }
   if (protocol === "responses_api") {
-    // Inference protocol support does not imply support for /v1/files.
-    if (providerSupportsResponsesEndpoint(request.apiBase || "")) {
-      return new OpenAIResponsesAgentAdapter();
-    }
-    return new OpenAIChatCompatAgentAdapter();
+    // Honor the resolved protocol; file uploads remain independently gated.
+    return new OpenAIResponsesAgentAdapter();
   }
   if (protocol === "anthropic_messages") {
     return new AnthropicMessagesAgentAdapter();

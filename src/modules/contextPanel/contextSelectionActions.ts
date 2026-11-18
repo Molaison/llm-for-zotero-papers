@@ -1,7 +1,10 @@
 import { t } from "../../utils/i18n";
-import { MAX_SELECTED_PAPER_CONTEXTS } from "./constants";
 import {
-  appendSelectedTextContextForItem,
+  MAX_SELECTED_PAPER_CONTEXTS,
+  MAX_SELECTED_TEXT_CONTEXTS,
+} from "./constants";
+import {
+  appendSelectedTextContextForItemDetailed,
   getSelectedTextContextEntries,
   setNoteContextExpanded,
   setSelectedTextContextEntries,
@@ -27,7 +30,6 @@ import {
   normalizeReferenceSelectorTagIdentityName,
 } from "./referenceSelector/model";
 import { composeContextStore } from "./contexts/composeContextStore";
-import { getConversationKey } from "./conversationIdentity";
 import type {
   CollectionContextRef,
   OtherContextRef,
@@ -130,7 +132,7 @@ export function upsertPaperContext(
     },
   ];
   composeContextStore.papers.set(item.id, nextPapers);
-  composeContextStore.initializedConversations.mark(getConversationKey(item));
+  composeContextStore.initializedConversations.mark(item.id);
   setPaperModeOverride(item.id, nextPapers[nextPapers.length - 1], "full-next");
   composeContextStore.paperPreviewExpanded.set(item.id, false);
   deps.updatePaperPreviewPreservingScroll();
@@ -154,7 +156,7 @@ export function upsertNoteTextContext(
   const noteItem = Zotero.Items.get(contextItemId) || null;
   const snapshot = readNoteSnapshot(noteItem);
   if (!snapshot?.text) return unchanged(t("Selected note is empty"), "warning");
-  const appended = appendSelectedTextContextForItem(
+  const outcome = appendSelectedTextContextForItemDetailed(
     textContextKey,
     snapshot.text,
     "note",
@@ -170,7 +172,21 @@ export function upsertNoteTextContext(
       title: snapshot.title || `Note ${snapshot.noteId}`,
     },
   );
-  if (!appended) return unchanged(t("Note already selected"), "warning");
+  if (outcome === "full") {
+    return unchanged(
+      t("Selected text/note limit reached ({limit})").replace(
+        "{limit}",
+        String(MAX_SELECTED_TEXT_CONTEXTS),
+      ),
+      "warning",
+    );
+  }
+  if (outcome === "duplicate") {
+    return unchanged(t("Note already selected"), "warning");
+  }
+  if (outcome !== "added") {
+    return unchanged(t("Selected note is empty"), "warning");
+  }
   deps.updateSelectedTextPreviewPreservingScroll();
   return changed(t("Note context added as text."), "ready");
 }
@@ -286,6 +302,7 @@ export function hasUserAddedContextForItem(params: {
     composeContextStore.otherRefs.list(itemId).length > 0 ||
     composeContextStore.collections.list(itemId).length > 0 ||
     composeContextStore.tags.list(itemId).length > 0 ||
+    composeContextStore.attachedConversations.list(itemId).length > 0 ||
     composeContextStore.images.list(itemId).length > 0 ||
     composeContextStore.files.list(itemId).length > 0 ||
     (textContextKey
@@ -296,16 +313,13 @@ export function hasUserAddedContextForItem(params: {
 
 export function clearUserAddedContextForItem(params: {
   itemId: number;
-  conversationKey?: number;
   textContextKey?: number | null;
 }): ContextSelectionActionResult {
   const itemId = normalizePositiveItemId(params.itemId);
   if (!itemId) return unchanged();
   const textContextKey = normalizePositiveItemId(params.textContextKey);
   const hadContext = hasUserAddedContextForItem({ itemId, textContextKey });
-  composeContextStore.initializedConversations.mark(
-    normalizePositiveItemId(params.conversationKey) || itemId,
-  );
+  composeContextStore.initializedConversations.mark(itemId);
 
   const removedPapers = composeContextStore.papers.list(itemId);
   composeContextStore.papers.delete(itemId);
@@ -317,6 +331,7 @@ export function clearUserAddedContextForItem(params: {
   composeContextStore.otherRefs.delete(itemId);
   composeContextStore.collections.delete(itemId);
   composeContextStore.tags.delete(itemId);
+  composeContextStore.attachedConversations.delete(itemId);
   composeContextStore.images.delete(itemId);
   composeContextStore.imagePreviewExpanded.delete(itemId);
   composeContextStore.imagePreviewActiveIndex.delete(itemId);
@@ -392,6 +407,103 @@ export function upsertReferenceAttachmentContext(params: {
   });
 }
 
+/** Apply one current-result batch without repainting previews for every entry. */
+export function batchReferenceAttachmentContexts(params: {
+  deps: ContextSelectionActionDeps;
+  targets: readonly {
+    group: PaperSearchGroupCandidate;
+    attachment: PaperSearchAttachmentCandidate;
+    kind: ReferenceAttachmentContextKind;
+    selected: boolean;
+  }[];
+  action: "select" | "clear";
+  log: (message: string, ...args: unknown[]) => void;
+}): ContextSelectionActionResult {
+  const { deps, action } = params;
+  let paperPreviewChanged = false;
+  let textPreviewChanged = false;
+  const batchDeps: ContextSelectionActionDeps = {
+    ...deps,
+    updatePaperPreviewPreservingScroll: () => {
+      paperPreviewChanged = true;
+    },
+    updateSelectedTextPreviewPreservingScroll: () => {
+      textPreviewChanged = true;
+    },
+  };
+  const seen = new Set<number>();
+  const reasons = new Map<string, number>();
+  let total = 0;
+  let modified = 0;
+  let alreadySelected = 0;
+  let notAdded = 0;
+  for (const target of params.targets) {
+    const id = target.attachment.contextItemId;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    total += 1;
+    if (action === "select" && target.selected) {
+      alreadySelected += 1;
+      continue;
+    }
+    let result: ContextSelectionActionResult;
+    try {
+      const args = {
+        deps: batchDeps,
+        selectedGroup: target.group,
+        selectedAttachment: target.attachment,
+        kind: target.kind,
+      };
+      result =
+        action === "select"
+          ? upsertReferenceAttachmentContext(args)
+          : removeReferenceAttachmentContext({ ...args, silent: true });
+    } catch (error) {
+      // Keep the original cause, but never pass note snapshots or target bodies.
+      params.log(
+        "LLM: Picker batch context update failed",
+        {
+          action,
+          kind: target.kind,
+          itemId: target.group.itemId,
+          contextItemId: id,
+        },
+        error,
+      );
+      result = unchanged(t("Reference could not be updated"), "error");
+    }
+    if (result.changed) modified += 1;
+    else if (action === "select" || result.statusLevel === "error") {
+      notAdded += 1;
+      const reason = result.statusMessage || t("No active conversation");
+      reasons.set(reason, (reasons.get(reason) || 0) + 1);
+    }
+  }
+  if (paperPreviewChanged) deps.updatePaperPreviewPreservingScroll();
+  if (textPreviewChanged) deps.updateSelectedTextPreviewPreservingScroll();
+  const values: Record<string, number> = {
+    selected: alreadySelected + modified,
+    total,
+    added: modified,
+    already: alreadySelected,
+    failed: notAdded,
+    removed: modified,
+  };
+  const summary = t(
+    action === "select"
+      ? "Selected {selected}/{total} references; added {added}; already selected {already}; not added {failed}."
+      : "Removed {removed} explicit selections from {total} current references; failed {failed}. Covered sources and other selected text were kept.",
+  ).replace(/\{(\w+)\}/g, (match, key: string) => String(values[key] ?? match));
+  return {
+    changed: modified > 0,
+    statusMessage: [
+      summary,
+      ...Array.from(reasons, ([reason, count]) => `${reason} (${count})`),
+    ].join(" "),
+    statusLevel: notAdded ? "warning" : "ready",
+  };
+}
+
 export function removeReferenceAttachmentContext(params: {
   deps: ContextSelectionActionDeps;
   selectedGroup: PaperSearchGroupCandidate;
@@ -428,9 +540,7 @@ export function removeReferenceAttachmentContext(params: {
       }
       composeContextStore.paperPreviewExpanded.set(item.id, false);
       deps.updatePaperPreviewPreservingScroll();
-      composeContextStore.initializedConversations.mark(
-        getConversationKey(item),
-      );
+      composeContextStore.initializedConversations.mark(item.id);
       removed = true;
     }
   } else if (kind === "note") {
@@ -495,7 +605,7 @@ export function removeReferenceGroupContexts(params: {
       clearPaperOverridesForItem(item.id, paper);
     }
     composeContextStore.paperPreviewExpanded.set(item.id, false);
-    composeContextStore.initializedConversations.mark(getConversationKey(item));
+    composeContextStore.initializedConversations.mark(item.id);
     removed = true;
   }
 
@@ -544,12 +654,12 @@ export function toggleCollectionContext(params: {
   if (existingIndex >= 0) {
     const next = existing.filter((_, index) => index !== existingIndex);
     composeContextStore.collections.replace(item.id, next);
-    composeContextStore.initializedConversations.mark(getConversationKey(item));
+    composeContextStore.initializedConversations.mark(item.id);
     deps.updatePaperPreviewPreservingScroll();
     return changed(t("Collection context removed."), "ready");
   }
   composeContextStore.collections.set(item.id, [...existing, ref]);
-  composeContextStore.initializedConversations.mark(getConversationKey(item));
+  composeContextStore.initializedConversations.mark(item.id);
   deps.updatePaperPreviewPreservingScroll();
   return changed(t("Collection context added."), "ready");
 }
@@ -606,12 +716,12 @@ export function toggleTagContext(params: {
   if (existingIndex >= 0) {
     const next = existing.filter((_, index) => index !== existingIndex);
     composeContextStore.tags.replace(item.id, next);
-    composeContextStore.initializedConversations.mark(getConversationKey(item));
+    composeContextStore.initializedConversations.mark(item.id);
     deps.updatePaperPreviewPreservingScroll();
     return changed(t("Tag context removed."), "ready");
   }
   composeContextStore.tags.set(item.id, [...existing, normalizedRef]);
-  composeContextStore.initializedConversations.mark(getConversationKey(item));
+  composeContextStore.initializedConversations.mark(item.id);
   deps.updatePaperPreviewPreservingScroll();
   return changed(t("Tag context added."), "ready");
 }

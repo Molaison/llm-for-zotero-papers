@@ -36,6 +36,7 @@ describe("library text index db", function () {
         .map((r) => r.name);
       assert.deepEqual(names, [
         "chunks",
+        "document_tokenizer",
         "documents",
         "index_meta",
         "postings",

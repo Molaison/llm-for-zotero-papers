@@ -1,3 +1,4 @@
+import { RequestExecution } from "../../utils/requestExecution";
 import {
   createFallbackToolCallId,
   groupToolContinuationMessages,
@@ -11,7 +12,12 @@ import {
   type UsageStats,
 } from "../../utils/llmClient";
 import type { ModelTurnCompletion } from "../../shared/llm";
+import { ModelStreamInterruptedError } from "./completion";
 import { extractContextCacheUsage } from "../../contextCache/manager";
+import {
+  isPdfDataUrl,
+  type ResponsesInlineFilePart,
+} from "../../utils/responsesPdfInputs";
 import type {
   AgentModelContentPart,
   AgentModelMessage,
@@ -21,7 +27,8 @@ import type {
 export type ResponsesInputContentPart =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string; detail?: "low" | "high" | "auto" }
-  | { type: "input_file"; file_id: string };
+  | { type: "input_file"; file_id: string }
+  | ResponsesInlineFilePart;
 
 export type ResponsesInputItem =
   | {
@@ -189,15 +196,26 @@ async function buildResponsesContentParts(
   options: {
     resolveFilePart: ResponsesFilePartResolver;
     signal?: AbortSignal;
+    inlinePdf?: boolean;
   },
 ): Promise<ResponsesInputContentPart[]> {
   const contentParts: ResponsesInputContentPart[] = [];
+  let pdfCounter = 0;
   for (const part of parts) {
     if (part.type === "text") {
       contentParts.push({ type: "input_text", text: part.text });
       continue;
     }
     if (part.type === "image_url") {
+      if (options.inlinePdf && isPdfDataUrl(part.image_url.url)) {
+        pdfCounter += 1;
+        contentParts.push({
+          type: "input_file",
+          filename: `document${pdfCounter > 1 ? `-${pdfCounter}` : ""}.pdf`,
+          file_data: part.image_url.url,
+        });
+        continue;
+      }
       contentParts.push({
         type: "input_image",
         image_url: part.image_url.url,
@@ -216,6 +234,7 @@ export async function buildResponsesInitialInput(
   options: {
     resolveFilePart: ResponsesFilePartResolver;
     signal?: AbortSignal;
+    inlinePdf?: boolean;
   },
 ): Promise<{ instructions?: string; input: ResponsesInputItem[] }> {
   const instructionsParts: string[] = [];
@@ -272,6 +291,7 @@ export async function buildResponsesContinuationInput(
   options: {
     resolveFilePart: ResponsesFilePartResolver;
     signal?: AbortSignal;
+    inlinePdf?: boolean;
   },
 ): Promise<ResponsesInputItem[]> {
   const { toolMessages, followupUserMessages } =
@@ -441,119 +461,228 @@ export function normalizeResponsesStepFromPayload(
   };
 }
 
+/** Error codes after which the same request may succeed when sent again. */
+const RETRYABLE_STREAM_ERROR_CODES: ReadonlySet<string> = new Set([
+  "server_error",
+  "api_error",
+  "internal_error",
+  "rate_limit_exceeded",
+  "rate_limit_error",
+  "slow_down",
+  "unknown_error",
+  "overloaded",
+  "overloaded_error",
+  "service_unavailable",
+  "server_overloaded",
+]);
+
+/** The HTTP-equivalent status of a retryable stream error code. */
+function streamErrorStatus(code: string): number | undefined {
+  if (!code) return undefined;
+  if (code.startsWith("rate_limit") || code === "slow_down") return 429;
+  if (code.includes("overload")) return 529;
+  if (/^5\d\d$/.test(code)) return Number(code);
+  return code.includes("unavailable") ? 503 : 500;
+}
+
+/**
+ * The error a `response.failed` or `error` event ends the step with. A
+ * server error, rate limit or an error without a code is a broken stream the
+ * runtime may retry (`turnBoundary.ts`, Rule 4); any other code is reported
+ * as `${code}: ${message}`, so a context-length code still reads as a prompt
+ * that is too long.
+ */
+function responsesStreamError(error: unknown): Error {
+  const row =
+    error && typeof error === "object"
+      ? (error as { code?: unknown; message?: unknown; type?: unknown })
+      : {};
+  // Without a code, the error's type names the kind (for example
+  // `invalid_request_error`). The event's own type, "error", names nothing.
+  const kind =
+    typeof row.type === "string" &&
+    row.type.trim() &&
+    row.type.trim().toLowerCase() !== "error"
+      ? row.type.trim()
+      : "";
+  const code =
+    typeof row.code === "string" && row.code.trim() ? row.code.trim() : kind;
+  const message =
+    typeof row.message === "string" && row.message.trim()
+      ? row.message.trim()
+      : "";
+  const lowerCode = code.toLowerCase();
+  if (
+    !code ||
+    RETRYABLE_STREAM_ERROR_CODES.has(lowerCode) ||
+    /overload|unavailable|^5\d\d$/.test(lowerCode)
+  ) {
+    const detail = [code, message].filter(Boolean).join(": ");
+    return new ModelStreamInterruptedError(
+      `The model stream ended with an error${detail ? ` (${detail})` : ""}.`,
+      streamErrorStatus(lowerCode),
+    );
+  }
+  return new Error(message ? `${code}: ${message}` : code);
+}
+
+/** The step's output items without the reasoning items at their end. */
+export function withoutTrailingReasoningItems(
+  items: readonly unknown[],
+): unknown[] {
+  let end = items.length;
+  while (end > 0) {
+    const item = items[end - 1];
+    const type =
+      item && typeof item === "object"
+        ? String((item as { type?: unknown }).type ?? "").toLowerCase()
+        : "";
+    if (type !== "reasoning") break;
+    end -= 1;
+  }
+  return items.slice(0, end);
+}
+
+/**
+ * The output items the next request replays after this step. A step with
+ * no text and no tool call keeps no trailing reasoning item: a reasoning
+ * item sent without the item that followed it is a request error.
+ */
+export function replayableResponsesOutputItems(
+  step: Pick<NormalizedResponsesStep, "text" | "toolCalls" | "outputItems">,
+): unknown[] {
+  return step.text || step.toolCalls.length
+    ? step.outputItems
+    : withoutTrailingReasoningItems(step.outputItems);
+}
+
 export async function parseResponsesStepStream(
   stream: ReadableStream<Uint8Array>,
   onTextDelta?: (delta: string) => void | Promise<void>,
   onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
   onUsage?: (usage: UsageStats) => void | Promise<void>,
+  options: { signal?: AbortSignal; stopAtTerminal?: boolean } = {},
 ): Promise<NormalizedResponsesStep> {
-  const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let responseId: string | undefined;
-  let latestPayload: ResponsesPayload | null = null;
-  let streamedText = "";
-  const streamedOutputs: ResponsesOutputItem[] = [];
-  const eventTypesSeen = new Set<string>();
-  let sawAnswerDelta = false;
-  let sawAnswerFinal = false;
-  let sawSummaryDelta = false;
-  let sawSummaryFinal = false;
-  let sawDetailsDelta = false;
-  let sawDetailsFinal = false;
+  const execution = new RequestExecution(undefined, options.signal);
+  return execution.run(async () => {
+    const reader =
+      stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let responseId: string | undefined;
+    let latestPayload: ResponsesPayload | null = null;
+    let streamedText = "";
+    const streamedOutputs: ResponsesOutputItem[] = [];
+    const eventTypesSeen = new Set<string>();
+    let sawAnswerDelta = false;
+    let sawAnswerFinal = false;
+    let sawSummaryDelta = false;
+    let sawSummaryFinal = false;
+    let sawDetailsDelta = false;
+    let sawDetailsFinal = false;
+    // Set by a `response.failed` or `error` event; thrown after the read
+    // loop, outside the per-event parse guard that skips malformed lines.
+    let streamError: Error | null = null;
 
-  const mergeOutputItem = (item: unknown) => {
-    if (!item || typeof item !== "object") return;
-    const normalizedItem = item as ResponsesOutputItem;
-    const key = getResponseOutputItemKey(normalizedItem);
-    if (!key) {
+    const mergeOutputItem = (item: unknown) => {
+      if (!item || typeof item !== "object") return;
+      const normalizedItem = item as ResponsesOutputItem;
+      const key = getResponseOutputItemKey(normalizedItem);
+      if (!key) {
+        streamedOutputs.push(normalizedItem);
+        return;
+      }
+      const existingIndex = streamedOutputs.findIndex(
+        (entry) => getResponseOutputItemKey(entry) === key,
+      );
+      if (existingIndex >= 0) {
+        streamedOutputs[existingIndex] = normalizedItem;
+        return;
+      }
       streamedOutputs.push(normalizedItem);
-      return;
-    }
-    const existingIndex = streamedOutputs.findIndex(
-      (entry) => getResponseOutputItemKey(entry) === key,
-    );
-    if (existingIndex >= 0) {
-      streamedOutputs[existingIndex] = normalizedItem;
-      return;
-    }
-    streamedOutputs.push(normalizedItem);
-  };
-
-  const emitReasoning = async (event: ReasoningEvent) => {
-    if (!onReasoning) return;
-    const summary =
-      typeof event.summary === "string" && event.summary.length > 0
-        ? event.summary
-        : undefined;
-    const details =
-      typeof event.details === "string" && event.details.length > 0
-        ? event.details
-        : undefined;
-    if (!summary && !details) return;
-    await onReasoning({ summary, details });
-  };
-
-  const emitAnswer = async (
-    value: unknown,
-    mode: "delta" | "final",
-  ): Promise<void> => {
-    const text =
-      extractOutputTextFromContent(value) || normalizeResponsesText(value);
-    if (!text) return;
-    if (mode === "delta" && sawAnswerFinal) return;
-    if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
-    if (mode === "delta") {
-      sawAnswerDelta = true;
-    } else {
-      sawAnswerFinal = true;
-    }
-    streamedText += text;
-    if (onTextDelta) {
-      await onTextDelta(text);
-    }
-  };
-
-  const emitReasoningFromOutputItem = async (value: unknown) => {
-    if (!value || typeof value !== "object") return;
-    const row = value as {
-      type?: unknown;
-      summary?: unknown;
-      content?: unknown;
-      text?: unknown;
-      reasoning?: unknown;
     };
-    const typeValue =
-      typeof row.type === "string" ? row.type.toLowerCase() : "";
-    if (typeValue !== "reasoning") return;
-    if (!sawSummaryDelta && !sawSummaryFinal) {
-      await emitReasoning({ summary: extractReasoningSummary(row.summary) });
-    }
-    if (!sawDetailsDelta && !sawDetailsFinal) {
-      await emitReasoning({
-        details:
-          normalizeReasoningText(row.content) ||
-          normalizeReasoningText(row.reasoning) ||
-          normalizeReasoningText(row.text),
-      });
-    }
-  };
 
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    const emitReasoning = async (event: ReasoningEvent) => {
+      if (!onReasoning) return;
+      const summary =
+        typeof event.summary === "string" && event.summary.length > 0
+          ? event.summary
+          : undefined;
+      const details =
+        typeof event.details === "string" && event.details.length > 0
+          ? event.details
+          : undefined;
+      if (!summary && !details) return;
+      await execution.wait(() => onReasoning({ summary, details }));
+    };
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(data) as {
+    const emitAnswer = async (
+      value: unknown,
+      mode: "delta" | "final",
+    ): Promise<void> => {
+      const text =
+        extractOutputTextFromContent(value) || normalizeResponsesText(value);
+      if (!text) return;
+      if (mode === "delta" && sawAnswerFinal) return;
+      if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
+      if (mode === "delta") {
+        sawAnswerDelta = true;
+      } else {
+        sawAnswerFinal = true;
+      }
+      streamedText += text;
+      if (onTextDelta) {
+        await execution.wait(() => onTextDelta(text));
+      }
+    };
+
+    const emitReasoningFromOutputItem = async (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const row = value as {
+        type?: unknown;
+        summary?: unknown;
+        content?: unknown;
+        text?: unknown;
+        reasoning?: unknown;
+      };
+      const typeValue =
+        typeof row.type === "string" ? row.type.toLowerCase() : "";
+      if (typeValue !== "reasoning") return;
+      if (!sawSummaryDelta && !sawSummaryFinal) {
+        await emitReasoning({ summary: extractReasoningSummary(row.summary) });
+      }
+      if (!sawDetailsDelta && !sawDetailsFinal) {
+        await emitReasoning({
+          details:
+            normalizeReasoningText(row.content) ||
+            normalizeReasoningText(row.reasoning) ||
+            normalizeReasoningText(row.text),
+        });
+      }
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await execution.wait(() => reader.read());
+        // At the end of the stream the unfinished line is the last line: a
+        // final event without a trailing newline is still an event.
+        let lines: string[];
+        if (done) {
+          lines = [buffer + decoder.decode()];
+          buffer = "";
+        } else {
+          buffer += decoder.decode(value, { stream: true });
+          lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+        }
+
+        for (const line of lines) {
+          execution.assertActive();
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          let parsed: {
             type?: unknown;
             delta?: unknown;
             text?: unknown;
@@ -569,9 +698,29 @@ export async function parseResponsesStepStream(
             };
             response?: ResponsesPayload;
           };
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            continue;
+          }
           const eventType =
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
           if (eventType) eventTypesSeen.add(eventType);
+          if (eventType === "response.failed") {
+            streamError = responsesStreamError(
+              (parsed.response as { error?: unknown } | undefined)?.error,
+            );
+            break;
+          }
+          if (eventType === "error") {
+            const row = parsed as { code?: unknown; error?: unknown };
+            streamError = responsesStreamError(
+              row.code == null && row.error && typeof row.error === "object"
+                ? row.error
+                : parsed,
+            );
+            break;
+          }
           if (eventType === "response.output_text.delta") {
             await emitAnswer(parsed.delta, "delta");
             continue;
@@ -750,6 +899,18 @@ export async function parseResponsesStepStream(
               eventType === "response.incomplete") &&
             parsed.response
           ) {
+            if (
+              options.stopAtTerminal &&
+              parsed.response.status &&
+              parsed.response.status !==
+                (eventType === "response.completed"
+                  ? "completed"
+                  : "incomplete")
+            ) {
+              throw new Error(
+                "Responses terminal event has an invalid response status.",
+              );
+            }
             latestPayload = parsed.response;
             if (
               typeof parsed.response.id === "string" &&
@@ -794,95 +955,106 @@ export async function parseResponsesStepStream(
                     : 0);
             if (onUsage && totalTokens > 0) {
               const cacheUsage = extractContextCacheUsage(usage);
-              await onUsage({
-                promptTokens:
-                  typeof usage?.input_tokens === "number"
-                    ? usage.input_tokens
-                    : 0,
-                completionTokens:
-                  typeof usage?.output_tokens === "number"
-                    ? usage.output_tokens
-                    : 0,
-                totalTokens,
-                ...cacheUsage,
-                ...(typeof usage?.input_tokens === "number"
-                  ? {
-                      contextTokens: usage.input_tokens,
-                      contextWindowIsAuthoritative: true,
-                    }
-                  : {}),
-              });
+              await execution.wait(() =>
+                onUsage({
+                  promptTokens:
+                    typeof usage?.input_tokens === "number"
+                      ? usage.input_tokens
+                      : 0,
+                  completionTokens:
+                    typeof usage?.output_tokens === "number"
+                      ? usage.output_tokens
+                      : 0,
+                  totalTokens,
+                  ...cacheUsage,
+                  ...(typeof usage?.input_tokens === "number"
+                    ? {
+                        contextTokens: usage.input_tokens,
+                        contextWindowIsAuthoritative: true,
+                      }
+                    : {}),
+                }),
+              );
             }
+            if (options.stopAtTerminal) break;
           }
-        } catch (_error) {
-          continue;
         }
+        if (streamError || done || (options.stopAtTerminal && latestPayload))
+          break;
       }
+    } finally {
+      void reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
-  } finally {
-    reader.releaseLock();
-  }
+    if (streamError) throw streamError;
 
-  if (latestPayload) {
-    const normalized = normalizeResponsesStepFromPayload(latestPayload);
-    const outputItems = mergeResponseOutputItems(
-      normalized.outputItems,
-      streamedOutputs,
-    );
+    if (latestPayload) {
+      const normalized = normalizeResponsesStepFromPayload(latestPayload);
+      const outputItems = mergeResponseOutputItems(
+        normalized.outputItems,
+        streamedOutputs,
+      );
+      const finalText =
+        normalized.text ||
+        streamedText.trim() ||
+        extractOutputText(outputItems).trim();
+      if (!finalText && (outputItems.length || eventTypesSeen.size > 0)) {
+        logEmptyResponse(
+          "LLM Agent: Empty responses step after completed payload",
+          {
+            responseId: normalized.responseId || responseId,
+            eventTypes: Array.from(eventTypesSeen),
+            outputItemTypes: outputItems
+              .map((item) =>
+                item && typeof item === "object"
+                  ? (item as { type?: unknown }).type
+                  : undefined,
+              )
+              .filter(Boolean),
+            hasOutputText:
+              Boolean(
+                latestPayload.output_text &&
+                normalizeResponsesText(latestPayload.output_text),
+              ) || false,
+          },
+        );
+      }
+      return {
+        responseId: normalized.responseId || responseId,
+        text: finalText,
+        toolCalls: extractToolCallsFromOutputs(outputItems),
+        outputItems,
+        completion: normalized.completion,
+      };
+    }
+
+    const toolCalls = extractToolCallsFromOutputs(streamedOutputs);
     const finalText =
-      normalized.text ||
-      streamedText.trim() ||
-      extractOutputText(outputItems).trim();
-    if (!finalText && (outputItems.length || eventTypesSeen.size > 0)) {
+      streamedText.trim() || extractOutputText(streamedOutputs).trim();
+    if (!finalText && !toolCalls.length) {
+      // No completed response and nothing to use (reasoning at most): the
+      // stream broke before the step finished. Some relays never send
+      // `response.completed`, so a stream with text or a tool call is kept.
       logEmptyResponse(
-        "LLM Agent: Empty responses step after completed payload",
+        "LLM Agent: Responses stream ended before the response finished",
         {
-          responseId: normalized.responseId || responseId,
+          responseId,
           eventTypes: Array.from(eventTypesSeen),
-          outputItemTypes: outputItems
-            .map((item) =>
-              item && typeof item === "object"
-                ? (item as { type?: unknown }).type
-                : undefined,
-            )
+          outputItemTypes: streamedOutputs
+            .map((item) => item.type)
             .filter(Boolean),
-          hasOutputText:
-            Boolean(
-              latestPayload.output_text &&
-              normalizeResponsesText(latestPayload.output_text),
-            ) || false,
         },
+      );
+      throw new ModelStreamInterruptedError(
+        "The model stream ended before the response finished.",
       );
     }
     return {
-      responseId: normalized.responseId || responseId,
+      responseId,
       text: finalText,
-      toolCalls: extractToolCallsFromOutputs(outputItems),
-      outputItems,
-      completion: normalized.completion,
+      toolCalls,
+      outputItems: streamedOutputs,
+      completion: { status: "complete" },
     };
-  }
-
-  const toolCalls = extractToolCallsFromOutputs(streamedOutputs);
-  const finalText =
-    streamedText.trim() || extractOutputText(streamedOutputs).trim();
-  if (!finalText && (streamedOutputs.length || eventTypesSeen.size > 0)) {
-    logEmptyResponse(
-      "LLM Agent: Empty responses step without completed payload",
-      {
-        responseId,
-        eventTypes: Array.from(eventTypesSeen),
-        outputItemTypes: streamedOutputs
-          .map((item) => item.type)
-          .filter(Boolean),
-      },
-    );
-  }
-  return {
-    responseId,
-    text: finalText,
-    toolCalls,
-    outputItems: streamedOutputs,
-    completion: { status: "complete" },
-  };
+  });
 }

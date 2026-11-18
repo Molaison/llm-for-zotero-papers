@@ -8,7 +8,8 @@ import type {
   CodexAppServerHistoryItem,
   CodexAppServerUserInput,
 } from "./codexAppServerInput";
-import { pathExists } from "./geckoFs";
+import { getIOUtils, pathExists } from "./geckoFs";
+import { getCodexHomePref } from "./codexHomePref";
 import { getRuntimePlatformInfo } from "./runtimePlatform";
 import { getReasoningDefaultLevelForModel } from "./reasoningProfiles";
 import { extractContextCacheUsage } from "../contextCache/manager";
@@ -21,10 +22,18 @@ import {
 } from "../agent/privacy/localDocumentPathRedaction";
 
 const DEFAULT_CODEX_APP_SERVER_TURN_TIMEOUT_MS = 300_000;
+/**
+ * How long a finished turn waits for its sub-agents' running turns, so their
+ * last tool calls still find the turn's MCP scope.
+ */
+export const CODEX_APP_SERVER_CHILD_TURN_GRACE_MS = 15_000;
+// Threads whose turn started before a spawn named them as this turn's child.
+const CODEX_APP_SERVER_UNTRACKED_STARTED_THREADS_MAX = 32;
 const DEFAULT_CODEX_APP_SERVER_REQUEST_TIMEOUT_MS = 60_000;
 const CODEX_APP_SERVER_STDERR_TAIL_WAIT_MS = 100;
 const CODEX_APP_SERVER_DIAGNOSTIC_BUFFER_MAX = 4000;
 const CODEX_APP_SERVER_DIAGNOSTIC_BUFFER_TRIM_THRESHOLD = 8000;
+const CODEX_APP_SERVER_CLOSE_REASON_MAX = 400;
 const CODEX_ENV_KEYS = [
   "CODEX_PATH",
   "HOME",
@@ -239,7 +248,8 @@ export class CodexAppServerProcess {
           request.method === "mcpServer/elicitation/request"),
     );
   }
-  private closeHandlers = new Set<() => void>();
+  private closeHandlers = new Set<(reason?: string) => void>();
+  private closeReason: string | undefined;
   private readLoopPromise: Promise<void> | null = null;
   private stderrLoopPromise: Promise<void> | null = null;
   private turnQueues = new Map<string, Promise<void>>();
@@ -315,7 +325,9 @@ export class CodexAppServerProcess {
       args = invocation.args;
       environment = invocation.environment;
     }
-    environment = buildCodexLaunchEnvironment(environment);
+    const codexHome = getCodexHomePref();
+    if (codexHome) await assertCodexHomeFolder(codexHome);
+    environment = buildCodexLaunchEnvironment(environment, codexHome);
     let proc: any;
     try {
       proc = await Subprocess.call({
@@ -644,19 +656,27 @@ export class CodexAppServerProcess {
    * start here: it throws CodexAppServerProcessRetiredError, so the caller
    * can start it on a fresh process.
    */
-  async runTurnExclusive<T>(callback: () => Promise<T>, key = ""): Promise<T> {
+  async runTurnExclusive<T>(
+    callback: () => Promise<T>,
+    key = "",
+    signal?: AbortSignal,
+  ): Promise<T> {
     const queueKey = this.supportsConcurrentTurns() ? `turn:${key}` : "turn:";
-    return this.runQueued(queueKey, async () => {
-      if (this.destroyed || this.destroyWhenIdleRequested) {
-        throw new CodexAppServerProcessRetiredError();
-      }
-      const release = this.holdActiveTurn();
-      try {
-        return await callback();
-      } finally {
-        release();
-      }
-    });
+    return this.runQueued(
+      queueKey,
+      async () => {
+        if (this.destroyed || this.destroyWhenIdleRequested) {
+          throw new CodexAppServerProcessRetiredError();
+        }
+        const release = this.holdActiveTurn();
+        try {
+          return await callback();
+        } finally {
+          release();
+        }
+      },
+      signal,
+    );
   }
 
   /**
@@ -664,26 +684,49 @@ export class CodexAppServerProcess {
    * reload, thread resume or start) across all conversations.
    */
   async runThreadSetupExclusive<T>(callback: () => Promise<T>): Promise<T> {
-    return this.runQueued(CODEX_APP_SERVER_SETUP_LOCK_KEY, callback);
+    return this.runQueued(CODEX_APP_SERVER_SETUP_LOCK_KEY, async () => {
+      if (this.destroyed || this.destroyWhenIdleRequested)
+        throw new CodexAppServerProcessRetiredError();
+      return callback();
+    });
   }
 
   private async runQueued<T>(
     key: string,
     callback: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
+    if (signal?.aborted) throw createAbortError();
     const previous = this.turnQueues.get(key) || Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     this.turnQueues.set(key, current);
-    await previous;
-    try {
-      return await callback();
-    } finally {
-      release();
-      if (this.turnQueues.get(key) === current) this.turnQueues.delete(key);
-    }
+    let started = false;
+    const work = (async () => {
+      await previous;
+      try {
+        if (signal?.aborted) throw createAbortError();
+        started = true;
+        return await callback();
+      } finally {
+        release();
+        if (this.turnQueues.get(key) === current) this.turnQueues.delete(key);
+      }
+    })();
+    if (!signal) return work;
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => {
+        // Once running, the callback owns cancellation and resource cleanup.
+        if (!started) reject(createAbortError());
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      void work
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener("abort", abort));
+    });
   }
 
   setServerUserAgent(userAgent: unknown): void {
@@ -750,9 +793,9 @@ export class CodexAppServerProcess {
     };
   }
 
-  onClose(handler: () => void): () => void {
+  onClose(handler: (reason?: string) => void): () => void {
     if (this.didNotifyClose || this.destroyed) {
-      handler();
+      handler(this.closeReason);
       return () => {};
     }
     this.closeHandlers.add(handler);
@@ -820,8 +863,14 @@ export class CodexAppServerProcess {
   }
 
   private writeRawMessage(message: Record<string, unknown>): void {
+    if (this.destroyed) return;
     const msg = JSON.stringify(message) + "\n";
-    (this.proc as any).stdin.write(msg);
+    void Promise.resolve((this.proc as any).stdin.write(msg)).catch((error) => {
+      this.fail(
+        error instanceof Error ? error : new Error(String(error)),
+        true,
+      );
+    });
   }
 
   destroy(): void {
@@ -865,6 +914,19 @@ export class CodexAppServerProcess {
   }
 
   private fail(error: Error, killProcess: boolean): void {
+    if (this.closeReason === undefined) {
+      const reason = redactAllRememberedLocalDocumentPathsFromTerminalText(
+        error.message || "",
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (reason) {
+        this.closeReason =
+          reason.length > CODEX_APP_SERVER_CLOSE_REASON_MAX
+            ? `${reason.slice(0, CODEX_APP_SERVER_CLOSE_REASON_MAX)}...`
+            : reason;
+      }
+    }
     if (!this.destroyed) {
       this.destroyed = true;
       for (const [, pending] of this.pendingRequests) {
@@ -884,9 +946,14 @@ export class CodexAppServerProcess {
     }
     if (this.didNotifyClose) return;
     this.didNotifyClose = true;
+    if (this.closeReason) {
+      appLogger.warn(
+        `[llm-for-zotero] codex app-server closed: ${this.closeReason}`,
+      );
+    }
     for (const handler of this.closeHandlers) {
       try {
-        handler();
+        handler(this.closeReason);
       } catch {
         /* ignore */
       }
@@ -1411,6 +1478,8 @@ export function waitForCodexAppServerTurnCompletion(params: {
   cacheKey?: string;
   processOptions?: CodexAppServerProcessOptions;
   timeoutMs?: number;
+  /** Upper bound on the wait for running child turns; tests shorten it. */
+  childTurnGraceMs?: number;
 }): Promise<string> {
   const {
     proc,
@@ -1427,12 +1496,22 @@ export function waitForCodexAppServerTurnCompletion(params: {
   } = params;
   const timeoutMs =
     params.timeoutMs ?? DEFAULT_CODEX_APP_SERVER_TURN_TIMEOUT_MS;
+  const childTurnGraceMs =
+    params.childTurnGraceMs ?? CODEX_APP_SERVER_CHILD_TURN_GRACE_MS;
   if (signal?.aborted) {
     return Promise.reject(createAbortError());
   }
   return new Promise((resolve, reject) => {
     let turnId = params.turnId || "";
     const childThreadIds = params.childThreadIds ?? new Set<string>();
+    // Running turns per tracked child thread, from their turn/started and
+    // turn/completed notifications.
+    const runningChildTurns = new Map<string, Set<string>>();
+    // A child's turn can start before the spawn item names its thread.
+    const startedUntrackedTurns = new Map<string, Set<string>>();
+    // Set while the finished turn waits for its running child turns.
+    let childGrace: { finish: () => void } | null = null;
+    let childGraceTimer: ReturnType<typeof setTimeout> | null = null;
     let proposalText: string | undefined;
     let callbacks = Promise.resolve();
     let callbackError: unknown;
@@ -1600,7 +1679,8 @@ export function waitForCodexAppServerTurnCompletion(params: {
       });
     };
     const scheduleTimeout = () => {
-      if (timeoutMs <= 0 || settled) return;
+      // The finished turn's wait for its children has its own bound.
+      if (timeoutMs <= 0 || settled || childGrace) return;
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
       }
@@ -1635,8 +1715,99 @@ export function waitForCodexAppServerTurnCompletion(params: {
         );
       }, timeoutMs);
     };
+    const noteTurnBoundary = (
+      turns: Map<string, Set<string>>,
+      method: unknown,
+      threadId: string,
+      boundaryTurnId: string,
+    ) => {
+      if (!boundaryTurnId) return;
+      if (method === "turn/started") {
+        let running = turns.get(threadId);
+        if (!running) {
+          if (
+            turns === startedUntrackedTurns &&
+            turns.size >= CODEX_APP_SERVER_UNTRACKED_STARTED_THREADS_MAX
+          ) {
+            const oldest = turns.keys().next().value;
+            if (oldest !== undefined) turns.delete(oldest);
+          }
+          running = new Set();
+          turns.set(threadId, running);
+        }
+        running.add(boundaryTurnId);
+      } else if (method === "turn/completed") {
+        const running = turns.get(threadId);
+        running?.delete(boundaryTurnId);
+        if (running && !running.size) turns.delete(threadId);
+        if (turns === runningChildTurns && !turns.size) childGrace?.finish();
+      }
+    };
+    const trackChildThread = (threadId: string) => {
+      childThreadIds.add(threadId);
+      const started = startedUntrackedTurns.get(threadId);
+      if (!started) return;
+      startedUntrackedTurns.delete(threadId);
+      runningChildTurns.set(
+        threadId,
+        new Set([...(runningChildTurns.get(threadId) ?? []), ...started]),
+      );
+    };
+    const interruptRunningChildTurns = () => {
+      for (const [childThreadId, turnIds] of runningChildTurns) {
+        for (const childTurnId of turnIds) {
+          void proc
+            .sendRequest(
+              "turn/interrupt",
+              { threadId: childThreadId, turnId: childTurnId },
+              5000,
+              { failProcessOnTimeout: false },
+            )
+            .catch((error) => {
+              appLogger.warn(
+                "Codex app-server: sub-agent turn/interrupt failed",
+                new Error(
+                  redactAllRememberedLocalDocumentPathsFromTerminalText(
+                    error instanceof Error ? error.message : String(error),
+                  ),
+                ),
+              );
+            });
+        }
+      }
+    };
+    // The turn itself finished; wait a bounded time for running child turns
+    // before releasing what the turn holds open (the caller's MCP scope).
+    const finishAfterChildTurns = (finish: () => void) => {
+      if (!runningChildTurns.size) {
+        finish();
+        return;
+      }
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      childGrace = {
+        finish: () => {
+          childGrace = null;
+          finish();
+        },
+      };
+      childGraceTimer = setTimeout(() => {
+        // A straggler's later MCP call would land in the next turn's run.
+        interruptRunningChildTurns();
+        childGrace?.finish();
+      }, childTurnGraceMs);
+    };
     const abortHandler = () => {
-      if (params.interruptOnAbort && params.threadId) {
+      if (childGrace) {
+        // The turn already finished: stop its children and keep its answer.
+        interruptRunningChildTurns();
+        childGrace.finish();
+        return;
+      }
+      if (params.interruptOnAbort && params.threadId && turnId) {
+        interruptRunningChildTurns();
         // The interrupted turn stays live on the server until the interrupt
         // answers, so it keeps its own hold for the decision below.
         const releaseHold = proc.holdActiveTurn();
@@ -1659,7 +1830,7 @@ export function waitForCodexAppServerTurnCompletion(params: {
             retireProcess();
           })
           .finally(releaseHold);
-      } else {
+      } else if (!params.interruptOnAbort || !params.startTurn) {
         retireProcess();
       }
       settle(() => reject(createAbortError()));
@@ -1683,6 +1854,11 @@ export function waitForCodexAppServerTurnCompletion(params: {
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
       }
+      if (childGraceTimer !== null) {
+        clearTimeout(childGraceTimer);
+      }
+      runningChildTurns.clear();
+      startedUntrackedTurns.clear();
       signal?.removeEventListener("abort", abortHandler);
       fn();
     }
@@ -1708,13 +1884,26 @@ export function waitForCodexAppServerTurnCompletion(params: {
           if (Array.isArray(receivers)) {
             for (const receiver of receivers) {
               if (typeof receiver === "string" && receiver) {
-                childThreadIds.add(receiver);
+                trackChildThread(receiver);
               }
             }
           }
         } else if (!childThreadIds.has(messageThreadId)) {
-          // Another conversation's message.
+          // Another conversation's message, or a child not yet named.
+          noteTurnBoundary(
+            startedUntrackedTurns,
+            message.method,
+            messageThreadId,
+            messageTurnId,
+          );
           return;
+        } else {
+          noteTurnBoundary(
+            runningChildTurns,
+            message.method,
+            messageThreadId,
+            messageTurnId,
+          );
         }
       }
       scheduleTimeout();
@@ -2011,36 +2200,81 @@ export function waitForCodexAppServerTurnCompletion(params: {
             : undefined;
       enqueue(() => onTurnCompleted?.({ turnId: completedTurnId, status }));
       void callbacks.then(() => {
-        if (callbackError) {
-          settle(() => reject(callbackError));
-        } else if (status === "completed") {
-          settle(() => resolve(getResolvedMessageText()));
-        } else if (status === "interrupted") {
-          settle(() => reject(createAbortError()));
+        // A second turn/completed during the grace must not start another.
+        if (settled || childGrace) return;
+        // Fixed now, so a wait for child turns cannot change the answer.
+        const text = getResolvedMessageText();
+        const settleNow = () => {
+          if (callbackError) {
+            settle(() => reject(callbackError));
+          } else if (status === "completed") {
+            settle(() => resolve(text));
+          } else if (status === "interrupted") {
+            settle(() => reject(createAbortError()));
+          } else {
+            settle(() =>
+              reject(
+                new Error(`Turn ended with status: ${status ?? "unknown"}`),
+              ),
+            );
+          }
+        };
+        if (status === "completed" && !callbackError) {
+          finishAfterChildTurns(settleNow);
         } else {
-          settle(() =>
-            reject(new Error(`Turn ended with status: ${status ?? "unknown"}`)),
-          );
+          // Failed, interrupted or errored: stop the children, do not wait.
+          interruptRunningChildTurns();
+          settleNow();
         }
       });
     });
 
     signal?.addEventListener("abort", abortHandler, { once: true });
-    unsubscribeClose = proc.onClose(() => {
-      void callbacks.then(() =>
-        settle(() => reject(new Error("Codex app-server connection closed"))),
-      );
+    unsubscribeClose = proc.onClose((reason) => {
+      void callbacks.then(() => {
+        // The turn itself finished before the connection closed.
+        if (childGrace) {
+          childGrace.finish();
+          return;
+        }
+        settle(() =>
+          reject(
+            new Error(
+              reason
+                ? `Codex app-server connection closed: ${reason}`
+                : "Codex app-server connection closed",
+            ),
+          ),
+        );
+      });
     });
     if (!settled && params.startTurn) {
+      const releaseStartHold = proc.holdActiveTurn();
       void params
         .startTurn()
         .then((id) => {
-          if (settled) return;
+          if (settled) {
+            // The caller may abort before turn/start returns its ID. Never
+            // interrupt an empty ID or abandon the late provider turn.
+            if (id && params.threadId) {
+              return proc
+                .sendRequest(
+                  "turn/interrupt",
+                  { threadId: params.threadId, turnId: id },
+                  5000,
+                  { failProcessOnTimeout: false },
+                )
+                .then(() => undefined)
+                .catch(() => retireProcess());
+            }
+            return;
+          }
           if (!id) throw new Error("Codex app-server did not return a turn ID");
           turnId = id;
           for (const deliver of buffered.splice(0)) deliver();
         })
-        .catch((error) => settle(() => reject(error)));
+        .catch((error) => settle(() => reject(error)))
+        .finally(releaseStartHold);
     }
   });
 }
@@ -2057,11 +2291,13 @@ export function waitForCodexAppServerThreadCompacted(params: {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribeClose = () => {};
 
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
       unsubCompacted();
+      unsubscribeClose();
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
       }
@@ -2100,6 +2336,13 @@ export function waitForCodexAppServerThreadCompacted(params: {
       return;
     }
     params.signal?.addEventListener("abort", abortHandler, { once: true });
+    unsubscribeClose = params.proc.onClose(() => {
+      settle(() =>
+        reject(
+          new Error("Codex app-server connection closed during compaction"),
+        ),
+      );
+    });
   });
 }
 
@@ -2154,8 +2397,26 @@ export function mergeCodexNoProxyValues(
   return entries.join(",");
 }
 
+async function assertCodexHomeFolder(path: string): Promise<void> {
+  let isFolder = await pathExists(path);
+  if (isFolder) {
+    try {
+      const type = (await getIOUtils()?.stat?.(path))?.type;
+      if (type) isFolder = type === "directory";
+    } catch {
+      /* exists() already passed; let Codex report anything else */
+    }
+  }
+  if (!isFolder) {
+    throw new Error(
+      `The Codex home folder set in Settings > Agent > Codex > Advanced does not exist or is not a folder: ${path}`,
+    );
+  }
+}
+
 function buildCodexLaunchEnvironment(
   invocationEnvironment?: Record<string, string>,
+  codexHome?: string,
 ): Record<string, string> {
   const runtimeEnv = getCodexRuntimeEnv();
   const noProxy = mergeCodexNoProxyValues(
@@ -2166,6 +2427,8 @@ function buildCodexLaunchEnvironment(
     ...invocationEnvironment,
     NO_PROXY: noProxy,
     no_proxy: noProxy,
+    // Only the child gets it; an empty setting keeps any inherited CODEX_HOME.
+    ...(codexHome ? { CODEX_HOME: codexHome } : {}),
   };
 }
 
@@ -2843,13 +3106,22 @@ export async function resolveCodexBinary(
 // Per-auth-mode singleton processes
 const processCache = new Map<string, Promise<CodexAppServerProcess>>();
 let unregisterQuitBlocker: (() => void) | null = null;
+let processStopPromise: Promise<void> | null = null;
 
 /**
  * Stops every cached app-server. Quitting skips onShutdown, so the first spawn
  * registers this for quit too; otherwise the process outlives Zotero (or, on a
  * plugin update, keeps running under the old plugin until Zotero exits).
  */
-export async function destroyAllCachedCodexAppServerProcesses(): Promise<void> {
+export function destroyAllCachedCodexAppServerProcesses(): Promise<void> {
+  if (processStopPromise) return processStopPromise;
+  processStopPromise = destroyAllCachedProcessesOnce().finally(() => {
+    processStopPromise = null;
+  });
+  return processStopPromise;
+}
+
+async function destroyAllCachedProcessesOnce(): Promise<void> {
   unregisterQuitBlocker?.();
   unregisterQuitBlocker = null;
   const pending = [...processCache.values()];
@@ -2869,7 +3141,11 @@ function buildProcessCacheKey(
   options: CodexAppServerProcessOptions = {},
 ): string {
   const codexPath = resolveCodexAppServerBinaryPath(options.codexPath);
-  return codexPath ? `${cacheKey}\u0000${codexPath}` : cacheKey;
+  const codexHome = getCodexHomePref();
+  let key = codexPath ? `${cacheKey}\u0000${codexPath}` : cacheKey;
+  // A changed home folder must start a fresh app-server, like a changed path.
+  if (codexHome) key += `\u0000home=${codexHome}`;
+  return key;
 }
 
 export function destroyCachedCodexAppServerProcess(
@@ -2884,17 +3160,28 @@ export function destroyCachedCodexAppServerProcess(
     return;
   }
 
+  if (proc) {
+    // A delayed failure from a retired owner must not evict its successor.
+    proc.destroy();
+    void existing
+      .then((cachedProc) => {
+        if (
+          cachedProc === proc &&
+          processCache.get(effectiveCacheKey) === existing
+        )
+          processCache.delete(effectiveCacheKey);
+      })
+      .catch(() => undefined);
+    return;
+  }
   processCache.delete(effectiveCacheKey);
-  existing
+  // An explicit owner was already destroyed above, even if its cached spawn
+  // later rejects. Without one, destroy whichever cached process arrives.
+  void existing
     .then((cachedProc) => {
-      if (proc && cachedProc !== proc) return;
       cachedProc.destroy();
     })
-    .catch(() => {
-      if (proc) {
-        proc.destroy();
-      }
-    });
+    .catch(() => undefined);
 }
 
 /**
@@ -2959,11 +3246,12 @@ export async function runCodexAppServerTurnOnCachedProcess<T>(
     cacheKey: string;
     options?: CodexAppServerProcessOptions;
     turnKey: string;
+    signal?: AbortSignal;
   },
   callback: (proc: CodexAppServerProcess) => Promise<T>,
 ): Promise<T> {
   const runOn = async (proc: CodexAppServerProcess) =>
-    proc.runTurnExclusive(() => callback(proc), target.turnKey);
+    proc.runTurnExclusive(() => callback(proc), target.turnKey, target.signal);
   const proc = await getOrCreateCodexAppServerProcess(
     target.cacheKey,
     target.options,
@@ -2982,6 +3270,7 @@ export async function getOrCreateCodexAppServerProcess(
   cacheKey: string,
   options: CodexAppServerProcessOptions = {},
 ): Promise<CodexAppServerProcess> {
+  if (processStopPromise) throw new CodexAppServerProcessRetiredError();
   const effectiveCacheKey = buildProcessCacheKey(cacheKey, options);
   const existing = processCache.get(effectiveCacheKey);
   if (existing) {
@@ -2994,15 +3283,22 @@ export async function getOrCreateCodexAppServerProcess(
       await destroyAllCachedCodexAppServerProcesses();
     },
   );
-  const promise = CodexAppServerProcess.spawn(options);
-  promise.then((proc) => {
+  const promise = CodexAppServerProcess.spawn(options).then((proc) => {
+    if (processCache.get(effectiveCacheKey) !== promise) {
+      proc.destroy();
+      throw new CodexAppServerProcessRetiredError();
+    }
     proc.onClose(() => {
       if (processCache.get(effectiveCacheKey) === promise) {
         processCache.delete(effectiveCacheKey);
       }
     });
+    return proc;
   });
   processCache.set(effectiveCacheKey, promise);
-  promise.catch(() => processCache.delete(effectiveCacheKey));
+  void promise.catch(() => {
+    if (processCache.get(effectiveCacheKey) === promise)
+      processCache.delete(effectiveCacheKey);
+  });
   return promise;
 }

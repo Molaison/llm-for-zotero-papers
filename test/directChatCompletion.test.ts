@@ -74,6 +74,27 @@ describe("direct chat completion recovery", function () {
     assert.isUndefined(requests[1]?.attachments);
   });
 
+  it("does not send a continuation for a frozen batch or stateful remote session", async function () {
+    let calls = 0;
+    const result = await callDirectChatTurnWithRecovery({
+      allowAutomaticRecovery: false,
+      request: baseRequest,
+      onDelta: () => undefined,
+      call: async () => {
+        calls += 1;
+        return {
+          text: "",
+          completion: { status: "incomplete", reason: "output_limit" },
+          continuationState: { responseId: "remote-owned-response" },
+        };
+      },
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(result.completion.status, "incomplete");
+    assert.equal(result.text, "");
+  });
+
   it("surfaces the specific reasoning-only diagnostic after the one retry", async function () {
     let calls = 0;
     const result = await callDirectChatTurnWithRecovery({

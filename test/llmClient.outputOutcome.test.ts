@@ -12,7 +12,9 @@ function makeSseStream(events: unknown[]): ReadableStream<Uint8Array> {
       const encoder = new TextEncoder();
       for (const event of events) {
         controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+          encoder.encode(
+            `data: ${typeof event === "string" ? event : JSON.stringify(event)}\n\n`,
+          ),
         );
       }
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -88,6 +90,112 @@ describe("LLM terminal outcome normalization", function () {
       reason: "output_limit",
       providerReason: "length",
     });
+  });
+
+  for (const withPartialText of [false, true]) {
+    it(`rejects a Chat SSE error ${withPartialText ? "after partial text and a stop reason" : "without visible text"} with UI-visible provider details`, async function () {
+      const error = {
+        message:
+          "The gateway could not project the upstream response to Chat Completions.",
+        code: "invalid_upstream_response",
+        type: "server_error",
+        private: "private-upstream-debug-token",
+      };
+      const deltas: string[] = [];
+      const body = makeSseStream([
+        ...(withPartialText
+          ? [
+              {
+                choices: [
+                  {
+                    delta: { content: "Partial answer" },
+                    finish_reason: "stop",
+                  },
+                ],
+              },
+            ]
+          : []),
+        { choices: [{ delta: {}, finish_reason: null }], error },
+      ]);
+      let failure: unknown;
+      try {
+        await parseStreamResponse(body, (delta) => deltas.push(delta));
+      } catch (err) {
+        failure = err;
+      }
+
+      assert.instanceOf(
+        failure,
+        Error,
+        "must reject rather than return an outcome",
+      );
+      for (const detail of [error.message, error.code, error.type]) {
+        assert.include((failure as Error).message, detail);
+      }
+      assert.notInclude((failure as Error).message, "private");
+      assert.notInclude((failure as Error).message, error.private);
+      assert.notProperty(failure, "private");
+      assert.propertyVal(failure, "code", error.code);
+      assert.propertyVal(failure, "type", error.type);
+      assert.equal(deltas.join(""), withPartialText ? "Partial answer" : "");
+      assert.isFalse(body.locked, "release the reader on failure");
+    });
+  }
+
+  it("still skips malformed Chat SSE JSON before valid answer frames", async function () {
+    const deltas: string[] = [];
+    const outcome = await parseStreamResponse(
+      makeSseStream([
+        '{"choices":',
+        { choices: [{ delta: { content: "Answer" } }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      ]),
+      (delta) => deltas.push(delta),
+    );
+
+    assert.equal(outcome.text, "Answer");
+    assert.equal(deltas.join(""), "Answer");
+    assert.equal(outcome.completion.status, "complete");
+  });
+
+  it("does not let malformed JSON hide a later structured Chat SSE error", async function () {
+    for (const error of [
+      { message: "Upstream failed", code: 502, type: "server_error" },
+      { code: 502, type: "server_error" },
+      {
+        message: { private: "private-message" },
+        code: { private: "private-code" },
+        type: { private: "private-type" },
+      },
+    ]) {
+      let failure: unknown;
+      try {
+        await parseStreamResponse(
+          makeSseStream(['{"choices":', { error }]),
+          () => undefined,
+        );
+      } catch (err) {
+        failure = err;
+      }
+
+      assert.instanceOf(failure, Error);
+      const hasValidCode = typeof error.code === "number";
+      assert.equal(
+        (failure as Error).message,
+        `Chat Completions stream error: ${
+          typeof error.message === "string"
+            ? error.message
+            : "Chat Completions stream failed."
+        }${hasValidCode ? "; code=502; type=server_error" : ""}`,
+      );
+      assert.propertyVal(failure, "code", hasValidCode ? 502 : undefined);
+      assert.propertyVal(
+        failure,
+        "type",
+        hasValidCode ? "server_error" : undefined,
+      );
+      assert.notInclude((failure as Error).message, "private");
+    }
   });
 
   it("preserves Responses continuation state for a reasoning-only cutoff", async function () {

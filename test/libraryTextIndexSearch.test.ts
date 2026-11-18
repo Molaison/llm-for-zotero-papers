@@ -94,6 +94,76 @@ describe("library text index search", function () {
     );
   });
 
+  it("scores a chunk that only says 'error' for the query 'errors', in memory and in the index alike", async function () {
+    const chunks = [
+      "Housing. The gauge housing was machined from aluminium.",
+      "Results. The calibration error stayed below one percent.",
+      "Drift. The readout drifted with temperature.",
+    ];
+    const local = buildChunkIndex(chunks);
+    const terms = tokenizeRetrievalQuery("errors");
+    assert.deepEqual(terms, ["errors"], "the query keeps its surface form");
+    const scores = local.chunkStats.map((stat) =>
+      scoreChunkBM25(
+        stat,
+        terms,
+        local.docFreq,
+        chunks.length,
+        local.avgChunkLength,
+      ),
+    );
+    assert.isAbove(scores[1], 0, "the singular chunk scores for the plural");
+    assert.equal(scores[0], 0);
+    assert.equal(scores[2], 0);
+    // "error" and "errors" are one index term: asking for both is not
+    // counted twice.
+    assert.closeTo(
+      scoreChunkBM25(
+        local.chunkStats[1],
+        ["errors", "error"],
+        local.docFreq,
+        chunks.length,
+        local.avgChunkLength,
+      ),
+      scores[1],
+      1e-12,
+    );
+    await store.upsertDocument({
+      attachmentId: 9401,
+      attachmentKey: "K9401",
+      libraryID: 1,
+      parentItemId: 940,
+      title: "Gauge calibration",
+      sourceType: "mineru",
+      sourceFingerprint: "fp9401",
+      sourceMtime: null,
+      sourceSize: null,
+      chunkerVersion: 2,
+      byteEstimate: 10,
+      chunks: chunks.map((text, chunkIndex) => ({
+        chunkIndex,
+        text,
+        tokenCount: local.chunkStats[chunkIndex].length,
+        meta: { chunkKind: "body" } as never,
+        tf: local.chunkStats[chunkIndex].tf,
+      })),
+    });
+    const result = await searchLibraryTextIndex({
+      store,
+      scopeAttachmentIds: [9401],
+      queries: ["errors"],
+      maxPapers: 1,
+      perPaperTopK: 3,
+    });
+    assert.deepEqual(
+      result.chunks.map((c) => c.chunkIndex),
+      [1],
+    );
+    assert.closeTo(result.chunks[0].bm25Score, scores[1], 1e-9);
+    assert.deepEqual(result.chunks[0].matchedTerms, ["errors"]);
+    assert.deepEqual(result.queryTerms, ["errors"]);
+  });
+
   it("returns each hit's enclosing standard section from an index built by the current chunker", async function () {
     const ctx = await buildMarkdownPdfContext(
       headingSequenceMarkdown(
@@ -251,16 +321,18 @@ describe("library text index search", function () {
       scope.push(id);
       await store.upsertDocument(
         id <= 35
-          ? doc(id, "hippocampal replay sleep", {
-              hippocampal: 1,
-              replay: 1,
-              sleep: 1,
-            })
-          : doc(id, "cortical oscillation spindle", {
-              cortical: 1,
-              oscillation: 1,
-              spindle: 1,
-            }),
+          ? doc(
+              id,
+              "hippocampal replay sleep",
+              // Postings hold index terms, as buildChunkIndex writes them.
+              buildChunkIndex(["hippocampal replay sleep"]).chunkStats[0].tf,
+            )
+          : doc(
+              id,
+              "cortical oscillation spindle",
+              buildChunkIndex(["cortical oscillation spindle"]).chunkStats[0]
+                .tf,
+            ),
       );
     }
     const result = await searchLibraryTextIndex({

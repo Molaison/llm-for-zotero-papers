@@ -430,8 +430,8 @@ export function installCitationNavigationRig(options: {
     },
     /**
      * FindController "find" dispatches a reader ran, without find-again and
-     * empty-query dispatches. A restore pass that re-sends the last query
-     * after a failed search is counted.
+     * empty-query dispatches. A restore pass that puts back an earlier
+     * non-empty search after a failed search is counted.
      */
     findQueries(itemId: number): string[] {
       return (readers.get(itemId)?.fixture.dispatched || [])

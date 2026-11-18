@@ -14,6 +14,7 @@ import {
 } from "../utils/llmDefaults";
 import { HTML_NS, createElement, el, iconBtn } from "../utils/domHelpers";
 import { registerAddonDialog } from "../utils/dialogRegistry";
+import { getTornChatWindows } from "./contextPanel/tornChatWindows";
 import {
   normalizeMaxTokens,
   normalizeOptionalInputTokenCap,
@@ -35,8 +36,10 @@ import {
   getFirstSelectableModelEntryId,
   getLastUsedModelEntryId,
   getModelProviderGroups,
+  notifyModelProviderGroupsChanged,
   setModelProviderGroups,
   setLastUsedModelEntryId,
+  subscribeModelProviderGroups,
   type ModelProviderAuthMode,
   type CodexDirectProviderGroup,
   type ModelProviderGroup,
@@ -67,6 +70,7 @@ import {
 } from "../utils/providerCardModelSection";
 import { describeProviderRow } from "./preferences/providerCards/providerRowHeader";
 import { registerUsagePreferencePanel } from "./preferences/usagePanel";
+import { createDeferredNotifier } from "./preferences/deferredNotifier";
 import {
   getModelCapabilities,
   getModelCatalogStatus,
@@ -171,6 +175,7 @@ import {
   getMineruCloudModel,
   isMineruForceOcrEnabled,
   getMineruLocalApiBase,
+  getMineruLocalServerCommand,
   getMineruLocalBackend,
   getMineruMode,
   type MineruCloudModel,
@@ -183,6 +188,9 @@ import {
   setMineruCloudModel,
   setMineruForceOcrEnabled,
   setMineruLocalApiBase,
+  setMineruLocalServerCommand,
+  getMineruLocalServerIdleMinutes,
+  setMineruLocalServerIdleMinutes,
   setMineruLocalBackend,
   setMineruMode,
   isGlobalAutoParseEnabled,
@@ -210,6 +218,14 @@ import {
   testMineruLocalConnection,
 } from "../utils/mineruClient";
 import {
+  getMineruServerStatus,
+  startMineruServer,
+  stopMineruServer,
+  onMineruServerStatusChange,
+  syncMineruServerStatus,
+  type MineruServerState,
+} from "../utils/mineruServerManager";
+import {
   MINERU_PARSE_FILTERS_CHANGED_EVENT,
   registerMineruManagerScript,
 } from "./mineruManagerScript";
@@ -219,8 +235,25 @@ import {
 } from "../services/mineru/sync";
 import { getRuntimePlatformInfo } from "../utils/runtimePlatform";
 import {
+  describeLegacyClaudeBridgeRemoval,
+  detectLegacyClaudeBridge,
+  getClaudeBridgeStatus,
+  onClaudeBridgeStatusChange,
+  restartClaudeBridge,
+  type ClaudeBridgeStatus,
+} from "../claudeCode/bridgeProcess";
+import {
   getClaudeAutoCompactThresholdPercent,
+  getClaudeBridgeExtraArgsPref,
+  getClaudeBridgeMode,
+  getClaudeBridgeNodePathPref,
   getClaudeBridgeUrl,
+  getClaudeCliPathPref,
+  getCustomClaudeBridgeUrl,
+  setClaudeBridgeExtraArgsPref,
+  setClaudeBridgeMode,
+  setClaudeBridgeNodePathPref,
+  setClaudeCliPathPref,
   getClaudeConfigSourcePref,
   getClaudeManagedInstructionTemplatePref,
   getClaudePermissionModePref,
@@ -256,6 +289,8 @@ import {
 } from "../claudeCode/permissionModes";
 import {
   getCodexBinaryPathPref,
+  getCodexHomePref,
+  setCodexHomePref,
   getCodexReasoningModePref,
   getCodexRuntimeModelPref,
   isCodexAppServerModeEnabled,
@@ -299,9 +334,11 @@ import { applyClaudeCodeModePreferenceChange } from "../claudeCode/bootstrapGate
 import {
   getTavilyApiKey,
   setTavilyApiKey,
-  getWebAccessProvider,
+  isWebAccessConfigured,
 } from "../webAccess/prefs";
 import { registerWebAccessPreferences } from "./preferences/webAccessPanel";
+import { registerSavedFilesPreferences } from "./preferences/savedFilesPanel";
+import { getAgentFilesRoot } from "../utils/agentFilesDirectory";
 import { TavilyClient } from "../webAccess/tavilyClient";
 import {
   clearLibraryTextIndex,
@@ -397,6 +434,26 @@ function getProviderProfile(index: number): ProviderProfile {
 }
 
 const DEFAULT_AGENT_BRIDGE_URL = "http://127.0.0.1:19787";
+
+/** One plain-language line (plus details on failure) for the Bridge status. */
+export function describeClaudeBridgeStatus(
+  status: ClaudeBridgeStatus,
+  managed: boolean,
+): string {
+  if (!managed) {
+    return "Using your own bridge at the Bridge URL in Advanced. Zotero does not start one.";
+  }
+  switch (status.state) {
+    case "running":
+      return `Running${status.nodeVersion ? ` with Node.js ${status.nodeVersion}` : ""}.`;
+    case "starting":
+      return "Starting…";
+    case "failed":
+      return status.message || "The bridge could not start.";
+    default:
+      return "Not running. It starts when Claude Code mode needs it.";
+  }
+}
 
 function getPresetSelectHelperText(presetId: ProviderPresetId): string {
   if (presetId === "customized") {
@@ -869,8 +926,27 @@ function cloneGroups(groups: ModelProviderGroup[]): ModelProviderGroup[] {
   });
 }
 
+// Text fields save on every keystroke, and each save used to rebuild every
+// open chat panel. The value is still stored at once; only the notification
+// to open panels waits for a 300 ms pause, a blur, or the window closing.
+const typedGroupsNotifier = createDeferredNotifier({
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) =>
+    clearTimeout(handle as ReturnType<typeof setTimeout>),
+  notify: notifyModelProviderGroupsChanged,
+  delayMs: 300,
+});
+
 function persistGroups(groups: ModelProviderGroup[]) {
+  // This save notifies, which covers any typed save still waiting.
+  typedGroupsNotifier.cancel();
   setModelProviderGroups(cloneGroups(groups));
+}
+
+/** persistGroups for per-keystroke edits: store now, notify after a pause. */
+function persistGroupsWhileTyping(groups: ModelProviderGroup[]) {
+  setModelProviderGroups(cloneGroups(groups), { notify: false });
+  typedGroupsNotifier.schedule();
 }
 
 function ensureModels(
@@ -1499,6 +1575,14 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   if (mineruLocalApiBaseEl?.placeholder) {
     mineruLocalApiBaseEl.placeholder = t(mineruLocalApiBaseEl.placeholder);
   }
+  const mineruLocalServerCommandEl = doc.querySelector(
+    `#${config.addonRef}-mineru-local-server-command`,
+  ) as HTMLInputElement | null;
+  if (mineruLocalServerCommandEl?.placeholder) {
+    mineruLocalServerCommandEl.placeholder = t(
+      mineruLocalServerCommandEl.placeholder,
+    );
+  }
   // Translate language dropdown options
   const localeSelectEl = doc.querySelector(
     `#${config.addonRef}-locale-select`,
@@ -1627,6 +1711,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   const codexAppServerPathInput = doc.querySelector(
     `#${config.addonRef}-codex-app-server-path`,
   ) as HTMLInputElement | null;
+  const codexHomeInput = doc.querySelector(
+    `#${config.addonRef}-codex-home`,
+  ) as HTMLInputElement | null;
   const codexAppServerPathHelper = doc.querySelector(
     `#${config.addonRef}-codex-app-server-path-helper`,
   ) as HTMLSpanElement | null;
@@ -1685,6 +1772,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   _window.addEventListener("unload", disposeDirectCardControllers, {
     once: true,
   });
+  // Typed provider edits notify open chat panels once the field loses focus
+  // or the window closes, without waiting for the pause.
+  const flushTypedGroups = () => typedGroupsNotifier.flush();
+  modelSections.addEventListener("focusout", flushTypedGroups);
+  _window.addEventListener("unload", flushTypedGroups, { once: true });
 
   // ── Render ────────────────────────────────────────────────────────
 
@@ -2028,7 +2120,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           group.presetIdOverride = selectedPresetId;
         }
         group.apiBase = apiUrlInput.value;
-        persistGroups(groups);
+        persistGroupsWhileTyping(groups);
         syncAddProviderBtn();
         for (const sync of modelPickerSyncers) sync();
       });
@@ -2065,7 +2157,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       apiKeyInput.addEventListener("input", () => {
         if (group.authMode === "webchat") return;
         group.apiKey = apiKeyInput.value;
-        persistGroups(groups);
+        persistGroupsWhileTyping(groups);
         syncAddProviderBtn();
         for (const sync of modelPickerSyncers) sync();
         if (
@@ -2626,8 +2718,10 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         );
         const resolveDetectedProfile = () =>
           getModelCapabilities({
+            // Gateways and local runtimes still need model-family inference.
+            // SiliconFlow needs its identity for catalogs on custom relay URLs.
             provider:
-              selectedPresetId === "customized" ? undefined : selectedPresetId,
+              selectedPresetId === "siliconflow" ? selectedPresetId : undefined,
             model: modelEntry.model,
             apiBase: group.apiBase,
             protocol: resolveModelSelectedProtocol(
@@ -2702,8 +2796,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           "optional",
         );
 
+        const resolveInputModeProtocol = () =>
+          resolveModelSelectedProtocol(group, selectedPresetId, modelEntry);
         const inputModeOptions = getModelInputModeOptionsForRuntime(
           group.authMode,
+          resolveInputModeProtocol(),
         );
         let inputModeFieldWrap: HTMLDivElement | null = null;
         let inputModeSelect: HTMLSelectElement | null = null;
@@ -2731,6 +2828,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             normalizeModelInputModeForRuntime(
               modelEntry.inputMode,
               group.authMode,
+              resolveInputModeProtocol(),
             ),
           );
           inputModeFieldWrap.append(inputModeFieldLabel, inputModeSelect);
@@ -2777,6 +2875,15 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           ? "Temperature: randomness (0–2)  ·  Output limit applies to one response, including hidden reasoning on some APIs; it does not limit total Agent duration  ·  Input mode: auto/text-only/vision"
           : "Temperature: randomness (0–2)  ·  Output limit applies to one response, including hidden reasoning on some APIs; it does not limit total Agent duration";
         advRow.append(advFields, prefHint(doc, t(inputModeHelpText)));
+        if (inputModeFieldWrap)
+          advRow.append(
+            prefHint(
+              doc,
+              t(
+                "PDF allowed is an explicit confirmation for API-key Responses models only. Auto uses declared capabilities; Vision allowed does not confirm PDF support.",
+              ),
+            ),
+          );
 
         // ── Capability, reasoning and extra-parameter controls ───────────
         // Part of the same advanced panel rather than a nested disclosure:
@@ -2795,7 +2902,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
             } else {
               delete modelEntry.profileOverride;
             }
-            persistGroups(groups);
+            // The profile editor commits on each keystroke in its fields.
+            persistGroupsWhileTyping(groups);
           },
           classes: {
             input: "llm-pref-input",
@@ -2846,10 +2954,16 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           modelEntry.inputTokenCap = normalizeOptionalInputTokenCap(
             inputCapField.input.value,
           );
+          modelEntry.providerProtocol = isProviderProtocol(
+            protocolFieldSelect.value,
+          )
+            ? protocolFieldSelect.value
+            : undefined;
           const nextInputMode = inputModeSelect
             ? normalizeModelInputModeForRuntime(
                 inputModeSelect.value,
                 group.authMode,
+                resolveInputModeProtocol(),
               )
             : undefined;
           if (nextInputMode) {
@@ -2857,11 +2971,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           } else {
             delete modelEntry.inputMode;
           }
-          modelEntry.providerProtocol = isProviderProtocol(
-            protocolFieldSelect.value,
-          )
-            ? protocolFieldSelect.value
-            : undefined;
           tempField.input.value = `${modelEntry.temperature}`;
           outputLimitSelect.value = outputLimitIsRuntimeManaged
             ? "managed"
@@ -2876,10 +2985,21 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
               ? `${modelEntry.inputTokenCap}`
               : "";
           if (inputModeSelect) {
+            inputModeSelect.replaceChildren();
+            for (const mode of getModelInputModeOptionsForRuntime(
+              group.authMode,
+              resolveInputModeProtocol(),
+            )) {
+              const opt = el(doc, "option") as HTMLOptionElement;
+              opt.value = mode;
+              opt.textContent = t(getModelInputModeLabel(mode));
+              inputModeSelect.appendChild(opt);
+            }
             inputModeSelect.value = resolveModelInputMode(
               normalizeModelInputModeForRuntime(
                 modelEntry.inputMode,
                 group.authMode,
+                resolveInputModeProtocol(),
               ),
             );
           }
@@ -2924,7 +3044,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           const previousModel = modelEntry.model;
           modelEntry.model = modelInput.value;
           onSelectedModelChanged(previousModel);
-          persistGroups(groups);
+          persistGroupsWhileTyping(groups);
           syncAddModelBtn();
           syncAddProviderBtn();
           syncAdvAvailability();
@@ -3145,6 +3265,88 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
 
     wrap.appendChild(addCard);
+
+    // WebChat needs no API credentials. Keep its entry available even while
+    // an API provider is empty, and reuse an existing WebChat configuration.
+    const webChatCard = createElement(
+      doc,
+      "div",
+      "llm-pref-row llm-pref-add-card",
+    );
+    const existingWebChat = groups.find(
+      (group) => group.authMode === "webchat",
+    );
+    const canOpenWebChat =
+      !!existingWebChat || groups.length < MAX_PROVIDER_COUNT;
+    const webChatLabel = existingWebChat
+      ? t("Open WebChat settings")
+      : t("Add WebChat");
+    const webChatBtn = createElement(doc, "div", "llm-pref-add-card-btn", {
+      tabIndex: canOpenWebChat ? 0 : -1,
+    });
+    webChatBtn.id = `${config.addonRef}-open-webchat`;
+    webChatBtn.setAttribute("role", "button");
+    webChatBtn.setAttribute("aria-disabled", String(!canOpenWebChat));
+    webChatCard.setAttribute("data-disabled", String(!canOpenWebChat));
+    webChatBtn.title = canOpenWebChat
+      ? webChatLabel
+      : t("Maximum %count% providers").replace(
+          "%count%",
+          String(MAX_PROVIDER_COUNT),
+        );
+    webChatBtn.appendChild(
+      createElement(doc, "span", "llm-pref-add-card-label", {
+        textContent: webChatLabel,
+      }),
+    );
+    const openWebChat = () => {
+      let target: ModelProviderGroup | undefined = groups.find(
+        (group) => group.authMode === "webchat",
+      );
+      if (!target) {
+        if (groups.length >= MAX_PROVIDER_COUNT) return;
+        target = transitionProviderAuthMode(
+          createEmptyProviderGroup(),
+          "webchat",
+        );
+        groups.push(target);
+        openProviderIds.add(target.id);
+        persistGroups(groups);
+        rerender();
+      }
+      openProviderIds.add(target.id);
+      const body = doc.getElementById(
+        `${config.addonRef}-provider-row-${target.id}-body`,
+      );
+      const card = body?.closest<HTMLElement>("[data-llm-provider-row]");
+      const toggle = card?.querySelector<HTMLButtonElement>(
+        ".llm-pref-row-toggle",
+      );
+      // Opening an existing row must not rerender other providers while the
+      // user is editing them.
+      if (body) body.hidden = false;
+      card?.setAttribute("data-open", "true");
+      toggle?.setAttribute("aria-expanded", "true");
+      doc.getElementById(`${config.addonRef}-auth-mode-${target.id}`)?.focus();
+      card?.scrollIntoView({ block: "nearest" });
+    };
+    webChatBtn.addEventListener("click", openWebChat);
+    webChatBtn.addEventListener("keydown", (event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key !== "Enter" && key !== " ") return;
+      event.preventDefault();
+      openWebChat();
+    });
+    webChatCard.appendChild(webChatBtn);
+    wrap.append(
+      webChatCard,
+      prefHint(
+        doc,
+        t(
+          "Use ChatGPT, DeepSeek, or Gemini through an open, signed-in browser tab and the Sync for Zotero extension.",
+        ),
+      ),
+    );
   };
 
   rerender();
@@ -3326,6 +3528,18 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         .forEach((n: Element) => push(n as HTMLElement));
       push(
         standaloneWin.document.getElementById(
+          "llmforzotero-standalone-chat-root",
+        ) as HTMLElement | null,
+      );
+    }
+    for (const tornWin of getTornChatWindows()) {
+      const d = tornWin.document;
+      if (!d) continue;
+      d.querySelectorAll("#llm-main").forEach((n: Element) =>
+        push(n as HTMLElement),
+      );
+      push(
+        d.getElementById(
           "llmforzotero-standalone-chat-root",
         ) as HTMLElement | null,
       );
@@ -3615,6 +3829,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         tavilyStatus.style.display = "none";
         tavilyStatus.textContent = "";
       }
+      refreshAgentRowSummaries();
     };
     tavilyApiKeyInput.addEventListener("change", commitTavilyKey);
     tavilyApiKeyInput.addEventListener("blur", commitTavilyKey);
@@ -3694,6 +3909,12 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     if (claudePermissionModeRefresh) {
       claudePermissionModeRefresh.disabled = true;
     }
+    if (!isClaudeCodeModeEnabled()) {
+      if (claudePermissionModeStatus) {
+        claudePermissionModeStatus.textContent = "Claude Code mode is off.";
+      }
+      return;
+    }
     if (claudePermissionModeStatus) {
       claudePermissionModeStatus.textContent =
         "Loading Claude Code permission modes…";
@@ -3704,7 +3925,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         bridgeUrl: getClaudeBridgeUrl(),
         settingSources: getClaudeSettingSourcesByPref(),
       });
-      if (refreshId !== claudePermissionRefreshId) return;
+      if (refreshId !== claudePermissionRefreshId || !isClaudeCodeModeEnabled())
+        return;
       const reconciliation = reconcileClaudePermissionMode({
         selectedId: getClaudePermissionModePref(),
         options: catalog.options,
@@ -3735,7 +3957,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           : "var(--fill-secondary, #777)";
       }
     } catch (error) {
-      if (refreshId !== claudePermissionRefreshId) return;
+      if (refreshId !== claudePermissionRefreshId || !isClaudeCodeModeEnabled())
+        return;
       agentPermissionModeSelect.replaceChildren();
       agentPermissionModeSelect.disabled = true;
       if (claudePermissionModeStatus) {
@@ -3748,7 +3971,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         refreshId === claudePermissionRefreshId &&
         claudePermissionModeRefresh
       ) {
-        claudePermissionModeRefresh.disabled = false;
+        claudePermissionModeRefresh.disabled = !isClaudeCodeModeEnabled();
       }
       refreshAgentRowSummaries();
     }
@@ -3763,6 +3986,13 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     if (codexPermissionProfileRefresh) {
       codexPermissionProfileRefresh.disabled = true;
     }
+    if (!isCodexAppServerModeEnabled()) {
+      currentCodexPermissionCatalog = null;
+      if (codexPermissionProfileStatus) {
+        codexPermissionProfileStatus.textContent = "Codex mode is off.";
+      }
+      return;
+    }
     if (codexPermissionProfileStatus) {
       codexPermissionProfileStatus.textContent =
         "Loading Codex permission profiles…";
@@ -3773,7 +4003,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         codexPath: getConfiguredCodexAppServerBinaryPath(),
         fresh: true,
       });
-      if (refreshId !== codexPermissionRefreshId) return;
+      if (
+        refreshId !== codexPermissionRefreshId ||
+        !isCodexAppServerModeEnabled()
+      )
+        return;
       currentCodexPermissionCatalog = catalog;
       const selectedAvailable = renderPermissionPreferenceOptions({
         select: codexPermissionProfileSelect,
@@ -3807,7 +4041,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           : "#e74c3c";
       }
     } catch (error) {
-      if (refreshId !== codexPermissionRefreshId) return;
+      if (
+        refreshId !== codexPermissionRefreshId ||
+        !isCodexAppServerModeEnabled()
+      )
+        return;
       currentCodexPermissionCatalog = null;
       codexPermissionProfileSelect.replaceChildren();
       codexPermissionProfileSelect.disabled = true;
@@ -3821,7 +4059,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         refreshId === codexPermissionRefreshId &&
         codexPermissionProfileRefresh
       ) {
-        codexPermissionProfileRefresh.disabled = false;
+        codexPermissionProfileRefresh.disabled = !isCodexAppServerModeEnabled();
       }
       refreshAgentRowSummaries();
     }
@@ -3883,6 +4121,12 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     `${config.prefsPrefix}.codexAppServerPermissionState`,
     () => void refreshCodexPermissionOptions(),
   );
+  observePermissionPreference(
+    `${config.prefsPrefix}.enableCodexAppServerMode`,
+    () => {
+      if (!isCodexAppServerModeEnabled()) void refreshCodexPermissionOptions();
+    },
+  );
   const unsubscribeCodexPermissionProcessChanges =
     subscribeCodexPermissionProcessChanges(
       () => void refreshCodexPermissionOptions(),
@@ -3940,10 +4184,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       originalOn
         ? [
             selectedOptionLabel(originalAgentPermissionModeSelect),
-            getWebAccessProvider() === "anysearch" ||
-            tavilyApiKeyInput?.value.trim()
-              ? t("Web search on")
-              : t("Web search off"),
+            isWebAccessConfigured() ? t("Web search on") : t("Web search off"),
           ]
         : [t("Off")],
     );
@@ -3980,6 +4221,10 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         ? [inputValue("notes-dir-nickname") || t("Notes"), notesPath]
         : [t("Not set")],
     );
+    const savedFilesRoot = getAgentFilesRoot();
+    setAgentRowSummary("saved-files", !!savedFilesRoot, [
+      savedFilesRoot || t("Not set"),
+    ]);
   };
 
   for (const row of Array.from(
@@ -4014,6 +4259,12 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     agentPanel.addEventListener("input", onAgentPanelEdit);
   }
   refreshAgentRowSummaries();
+  // A DeepSeek model profile can turn web search on or off.
+  _window.addEventListener(
+    "unload",
+    subscribeModelProviderGroups(() => refreshAgentRowSummaries()),
+    { once: true },
+  );
 
   if (codexAppServerEnableToggle) {
     const applyCodexAppServerUi = (enabled: boolean) => {
@@ -4030,8 +4281,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       applyCodexAppServerModePreferenceChange(enabled);
       if (enabled) {
         void refreshCodexCatalog();
-        void refreshCodexPermissionOptions();
       }
+      void refreshCodexPermissionOptions();
     });
   }
 
@@ -4199,6 +4450,21 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     codexAppServerPathInput.addEventListener("blur", commitCodexPath);
     codexAppServerPathInput.addEventListener("input", () => {
       setCodexBinaryPathPref(codexAppServerPathInput.value);
+    });
+  }
+
+  if (codexHomeInput) {
+    codexHomeInput.value = getCodexHomePref();
+    const commitCodexHome = () => {
+      setCodexHomePref(codexHomeInput.value);
+      codexHomeInput.value = getCodexHomePref();
+      void refreshCodexCatalog();
+      void refreshCodexPermissionOptions();
+    };
+    codexHomeInput.addEventListener("change", commitCodexHome);
+    codexHomeInput.addEventListener("blur", commitCodexHome);
+    codexHomeInput.addEventListener("input", () => {
+      setCodexHomePref(codexHomeInput.value);
     });
   }
 
@@ -4405,6 +4671,14 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   ) => {
     if (!claudeCodeModelSelect) return;
     const requestId = ++claudeModelCatalogRequestId;
+    if (!isClaudeCodeModeEnabled()) {
+      claudeCodeModelSelect.disabled = true;
+      claudeCodeModelSelect.setAttribute("aria-busy", "false");
+      if (claudeCodeModelRefreshButton)
+        claudeCodeModelRefreshButton.disabled = true;
+      renderClaudeModelCatalogStatus("Claude Code mode is off.");
+      return;
+    }
     const preserveCustomDraft = shouldPreserveClaudeCustomModelDraft({
       customized:
         claudeCodeModelSelect.value === CLAUDE_CUSTOMIZED_MODEL_OPTION_KEY,
@@ -4427,7 +4701,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         settingSources: getClaudeSettingSourcesByPref(),
         forceRefresh,
       });
-      if (requestId !== claudeModelCatalogRequestId) return;
+      if (
+        requestId !== claudeModelCatalogRequestId ||
+        !isClaudeCodeModeEnabled()
+      )
+        return;
       if (claudeCodeModelStatus) claudeCodeModelStatus.title = "";
       claudeModelPreferenceOptions = buildClaudeModelPreferenceOptions(
         catalog.models,
@@ -4454,7 +4732,11 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         );
       }
     } catch (error) {
-      if (requestId !== claudeModelCatalogRequestId) return;
+      if (
+        requestId !== claudeModelCatalogRequestId ||
+        !isClaudeCodeModeEnabled()
+      )
+        return;
       const message = error instanceof Error ? error.message : String(error);
       if (!claudeModelPreferenceOptions.length) {
         syncClaudeModelPreferenceUi(preserveCustomDraft);
@@ -4466,10 +4748,10 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       if (claudeCodeModelStatus) claudeCodeModelStatus.title = message;
     } finally {
       if (requestId === claudeModelCatalogRequestId) {
-        claudeCodeModelSelect.disabled = false;
+        claudeCodeModelSelect.disabled = !isClaudeCodeModeEnabled();
         claudeCodeModelSelect.setAttribute("aria-busy", "false");
         if (claudeCodeModelRefreshButton) {
-          claudeCodeModelRefreshButton.disabled = false;
+          claudeCodeModelRefreshButton.disabled = !isClaudeCodeModeEnabled();
         }
         // The row summary names the customized model, which only exists once
         // the catalog has settled and filled the custom field.
@@ -4477,6 +4759,16 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       }
     }
   };
+
+  observePermissionPreference(
+    `${config.prefsPrefix}.enableClaudeCodeMode`,
+    () => {
+      if (!isClaudeCodeModeEnabled()) {
+        void refreshClaudeModelSuggestions();
+        void refreshClaudePermissionOptions();
+      }
+    },
+  );
 
   if (claudeCodeEnableToggle) {
     const applyAgentBackendUi = (enabled: boolean) => {
@@ -4490,20 +4782,174 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     claudeCodeEnableToggle.addEventListener("change", () => {
       const enabled = claudeCodeEnableToggle.checked;
       void applyClaudeCodeModePreferenceChange(enabled, applyAgentBackendUi);
+      // The bridge only starts once the mode is on, so load its lists now.
+      refreshClaudeBridgeConsumers();
+      refreshClaudeBridgeStatusUi();
+      refreshClaudeBridgeLegacyNotice();
     });
   }
 
+  const claudeBridgeUseOwnToggle = doc.querySelector(
+    `#${config.addonRef}-claude-bridge-use-own`,
+  ) as HTMLInputElement | null;
+  const applyClaudeBridgeModeUi = () => {
+    const custom = getClaudeBridgeMode() === "custom";
+    if (claudeBridgeUseOwnToggle) claudeBridgeUseOwnToggle.checked = custom;
+    if (agentBridgeUrlInput) agentBridgeUrlInput.disabled = !custom;
+  };
+  const refreshClaudeBridgeConsumers = () => {
+    void refreshClaudeModelSuggestions(true, true);
+    void refreshClaudePermissionOptions();
+  };
+
   if (agentBridgeUrlInput) {
     agentBridgeUrlInput.value =
-      getClaudeBridgeUrl() || DEFAULT_AGENT_BRIDGE_URL;
+      getCustomClaudeBridgeUrl() || DEFAULT_AGENT_BRIDGE_URL;
     const commitBridgeUrl = () => {
+      if (getCustomClaudeBridgeUrl() === agentBridgeUrlInput.value.trim()) {
+        return;
+      }
       setClaudeBridgeUrl(agentBridgeUrlInput.value);
-      void refreshClaudeModelSuggestions(true, true);
-      void refreshClaudePermissionOptions();
+      refreshClaudeBridgeConsumers();
     };
     agentBridgeUrlInput.addEventListener("change", commitBridgeUrl);
     agentBridgeUrlInput.addEventListener("blur", commitBridgeUrl);
   }
+  if (claudeBridgeUseOwnToggle) {
+    claudeBridgeUseOwnToggle.addEventListener("change", () => {
+      setClaudeBridgeMode(
+        claudeBridgeUseOwnToggle.checked ? "custom" : "managed",
+      );
+      applyClaudeBridgeModeUi();
+      refreshClaudeBridgeStatusUi();
+      refreshClaudeBridgeLegacyNotice();
+      refreshClaudeBridgeConsumers();
+    });
+  }
+  applyClaudeBridgeModeUi();
+
+  const bindClaudeBridgeTextPref = (
+    id: string,
+    read: () => string,
+    write: (value: string) => void,
+  ) => {
+    const input = doc.querySelector(
+      `#${config.addonRef}-${id}`,
+    ) as HTMLInputElement | null;
+    if (!input) return;
+    input.value = read();
+    const commit = () => {
+      if (input.value.trim() === read()) return;
+      write(input.value);
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("blur", commit);
+  };
+  bindClaudeBridgeTextPref(
+    "claude-bridge-node-path",
+    getClaudeBridgeNodePathPref,
+    setClaudeBridgeNodePathPref,
+  );
+  bindClaudeBridgeTextPref(
+    "claude-bridge-cli-path",
+    getClaudeCliPathPref,
+    setClaudeCliPathPref,
+  );
+  bindClaudeBridgeTextPref(
+    "claude-bridge-extra-args",
+    getClaudeBridgeExtraArgsPref,
+    setClaudeBridgeExtraArgsPref,
+  );
+
+  const claudeBridgeStatusText = doc.querySelector(
+    `#${config.addonRef}-claude-bridge-status`,
+  ) as HTMLSpanElement | null;
+  const claudeBridgeRestartButton = doc.querySelector(
+    `#${config.addonRef}-claude-bridge-restart`,
+  ) as HTMLButtonElement | null;
+  const claudeBridgeOpenLogButton = doc.querySelector(
+    `#${config.addonRef}-claude-bridge-open-log`,
+  ) as HTMLButtonElement | null;
+  function refreshClaudeBridgeStatusUi(): void {
+    const managed = getClaudeBridgeMode() === "managed";
+    const bridgeStatus = getClaudeBridgeStatus();
+    if (claudeBridgeStatusText) {
+      claudeBridgeStatusText.textContent = describeClaudeBridgeStatus(
+        bridgeStatus,
+        managed,
+      );
+    }
+    if (claudeBridgeRestartButton) {
+      claudeBridgeRestartButton.disabled =
+        !isClaudeCodeModeEnabled() ||
+        !managed ||
+        bridgeStatus.state === "starting";
+    }
+    if (claudeBridgeOpenLogButton) {
+      claudeBridgeOpenLogButton.disabled = !managed || !bridgeStatus.logFile;
+    }
+  }
+  refreshClaudeBridgeStatusUi();
+  const claudeBridgeLegacyNotice = doc.querySelector(
+    `#${config.addonRef}-claude-bridge-legacy-notice`,
+  ) as HTMLElement | null;
+  let claudeBridgeWindowClosed = false;
+  _window.addEventListener(
+    "unload",
+    () => {
+      claudeBridgeWindowClosed = true;
+    },
+    { once: true },
+  );
+  function refreshClaudeBridgeLegacyNotice(): void {
+    if (!claudeBridgeLegacyNotice) return;
+    // Someone who uses their own bridge may run it on the old port on purpose.
+    const wanted = () =>
+      isClaudeCodeModeEnabled() && getClaudeBridgeMode() !== "custom";
+    if (!wanted()) {
+      claudeBridgeLegacyNotice.style.display = "none";
+      return;
+    }
+    void detectLegacyClaudeBridge().then((found) => {
+      if (!found || claudeBridgeWindowClosed || !wanted()) {
+        return;
+      }
+      const isMac = getRuntimePlatformInfo().platform === "macos";
+      claudeBridgeLegacyNotice.textContent = "";
+      for (const line of describeLegacyClaudeBridgeRemoval(isMac)) {
+        const row = doc.createElement("div");
+        row.textContent = line || "\u00a0";
+        if (line.startsWith("    ")) row.style.fontFamily = "monospace";
+        claudeBridgeLegacyNotice.appendChild(row);
+      }
+      claudeBridgeLegacyNotice.style.display = "block";
+    });
+  }
+  refreshClaudeBridgeLegacyNotice();
+  const unsubscribeClaudeBridgeStatus = onClaudeBridgeStatusChange(
+    refreshClaudeBridgeStatusUi,
+  );
+  _window.addEventListener("unload", unsubscribeClaudeBridgeStatus, {
+    once: true,
+  });
+  claudeBridgeRestartButton?.addEventListener("click", () => {
+    void restartClaudeBridge()
+      .then(refreshClaudeBridgeConsumers)
+      .catch(() => {
+        // The status line shows the reason.
+      });
+  });
+  claudeBridgeOpenLogButton?.addEventListener("click", () => {
+    const logFile = getClaudeBridgeStatus().logFile;
+    if (!logFile) return;
+    try {
+      (
+        Zotero as unknown as { launchFile?: (path: string) => void }
+      ).launchFile?.(logFile);
+    } catch (error) {
+      ztoolkit.log("LLM: could not open the Claude bridge log", error);
+    }
+  });
 
   const copyTextToClipboard = async (text: string) => {
     const value = text.trim();
@@ -5133,6 +5579,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       });
     }
   }
+
+  // ── Saved files: the agent's folder and its cleanup ─────────────
+  registerSavedFilesPreferences(doc, () => refreshAgentRowSummaries());
 
   // ── Semantic Search settings ───────────────────────────────────
   // Follows the same toggle + sub-settings pattern as MinerU.
@@ -5942,6 +6391,126 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       commitMineruLocalApiBase,
     );
     mineruLocalApiBaseInput.addEventListener("blur", commitMineruLocalApiBase);
+  }
+
+  const mineruLocalServerCommandInput = doc.querySelector(
+    `#${config.addonRef}-mineru-local-server-command`,
+  ) as HTMLInputElement | null;
+  const mineruLocalServerManagedContainer = doc.querySelector(
+    `#${config.addonRef}-mineru-local-server-managed-container`,
+  ) as HTMLDivElement | null;
+  const mineruLocalServerIdleMinutesInput = doc.querySelector(
+    `#${config.addonRef}-mineru-local-server-idle-minutes`,
+  ) as HTMLInputElement | null;
+  const mineruLocalServerStatusSpan = doc.querySelector(
+    `#${config.addonRef}-mineru-local-server-status`,
+  ) as HTMLSpanElement | null;
+  const mineruLocalServerToggleBtn = doc.querySelector(
+    `#${config.addonRef}-mineru-local-server-toggle-btn`,
+  ) as HTMLButtonElement | null;
+
+  const syncManagedServerVisibility = () => {
+    if (mineruLocalServerManagedContainer) {
+      const hasCommand = Boolean(getMineruLocalServerCommand());
+      mineruLocalServerManagedContainer.style.display = hasCommand
+        ? "flex"
+        : "none";
+    }
+  };
+  syncManagedServerVisibility();
+
+  if (mineruLocalServerCommandInput) {
+    mineruLocalServerCommandInput.value = getMineruLocalServerCommand();
+    const commitMineruLocalServerCommand = () => {
+      setMineruLocalServerCommand(mineruLocalServerCommandInput.value);
+      mineruLocalServerCommandInput.value = getMineruLocalServerCommand();
+      syncManagedServerVisibility();
+    };
+    mineruLocalServerCommandInput.addEventListener(
+      "change",
+      commitMineruLocalServerCommand,
+    );
+    mineruLocalServerCommandInput.addEventListener(
+      "blur",
+      commitMineruLocalServerCommand,
+    );
+  }
+
+  if (mineruLocalServerIdleMinutesInput) {
+    mineruLocalServerIdleMinutesInput.value = `${getMineruLocalServerIdleMinutes()}`;
+    const commitIdleMinutes = () => {
+      setMineruLocalServerIdleMinutes(
+        Number(mineruLocalServerIdleMinutesInput.value),
+      );
+      mineruLocalServerIdleMinutesInput.value = `${getMineruLocalServerIdleMinutes()}`;
+    };
+    mineruLocalServerIdleMinutesInput.addEventListener(
+      "change",
+      commitIdleMinutes,
+    );
+    mineruLocalServerIdleMinutesInput.addEventListener(
+      "blur",
+      commitIdleMinutes,
+    );
+  }
+
+  const renderManagedServerStatus = (state: MineruServerState) => {
+    if (!mineruLocalServerStatusSpan || !mineruLocalServerToggleBtn) return;
+    switch (state) {
+      case "running":
+        mineruLocalServerStatusSpan.textContent = t("Running");
+        mineruLocalServerStatusSpan.style.color = "green";
+        mineruLocalServerToggleBtn.disabled = false;
+        mineruLocalServerToggleBtn.textContent = t("Stop Server");
+        break;
+      case "starting":
+        mineruLocalServerStatusSpan.textContent = t("Starting…");
+        mineruLocalServerStatusSpan.style.color = "#b45309";
+        mineruLocalServerToggleBtn.disabled = true;
+        mineruLocalServerToggleBtn.textContent = t("Starting…");
+        break;
+      case "stopping":
+        mineruLocalServerStatusSpan.textContent = t("Stopping…");
+        mineruLocalServerStatusSpan.style.color = "#b45309";
+        mineruLocalServerToggleBtn.disabled = true;
+        mineruLocalServerToggleBtn.textContent = t("Stopping…");
+        break;
+      case "stopped":
+      default:
+        mineruLocalServerStatusSpan.textContent = t("Stopped");
+        mineruLocalServerStatusSpan.style.color = "var(--fill-secondary, #888)";
+        mineruLocalServerToggleBtn.disabled = false;
+        mineruLocalServerToggleBtn.textContent = t("Start Server");
+        break;
+    }
+  };
+
+  renderManagedServerStatus(getMineruServerStatus());
+  const unsubscribeStatus = onMineruServerStatusChange((state) =>
+    renderManagedServerStatus(state),
+  );
+  _window?.addEventListener("unload", unsubscribeStatus, { once: true });
+
+  void syncMineruServerStatus(getMineruLocalApiBase());
+
+  if (mineruLocalServerToggleBtn) {
+    mineruLocalServerToggleBtn.addEventListener("click", () => {
+      const current = getMineruServerStatus();
+      if (current === "running") {
+        void stopMineruServer("manual");
+      } else if (current === "stopped") {
+        void startMineruServer(getMineruLocalApiBase(), (stage) => {
+          if (mineruLocalServerStatusSpan) {
+            mineruLocalServerStatusSpan.textContent = stage;
+          }
+        }).catch((err) => {
+          if (mineruLocalServerStatusSpan) {
+            mineruLocalServerStatusSpan.textContent = `\u2717 ${(err as Error).message}`;
+            mineruLocalServerStatusSpan.style.color = "red";
+          }
+        });
+      }
+    });
   }
 
   if (mineruLocalBackendSelect) {

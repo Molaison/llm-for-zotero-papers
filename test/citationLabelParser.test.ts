@@ -74,6 +74,52 @@ describe("citationLabelParser", function () {
     assert.isFalse(isCanonicalSourceCitationLabel("(Figure 1)"));
   });
 
+  it("parses dash-led and emphasis-wrapped source labels", function () {
+    for (const [raw, sourceLabel] of [
+      ["— (Smith et al., 2020)", "(Smith et al., 2020)"],
+      ["— Smith et al., 2020", "(Smith et al., 2020)"],
+      ["—Smith et al., 2020", "(Smith et al., 2020)"],
+      ["– Smith & Jones, 2020", "(Smith & Jones, 2020)"],
+      ["-- Kim, 2026", "(Kim, 2026)"],
+      ["— Kim, n.d.", "(Kim, n.d.)"],
+      ["**(Smith et al., 2020)**", "(Smith et al., 2020)"],
+      ["*(Smith et al., 2020)*", "(Smith et al., 2020)"],
+      ["_(Smith et al., 2020)_", "(Smith et al., 2020)"],
+      ["— *(Smith et al., 2020)*", "(Smith et al., 2020)"],
+      ["*— Smith et al., 2020*", "(Smith et al., 2020)"],
+      ["**— (Smith et al., 2020, page 4)**", "(Smith et al., 2020)"],
+    ] as const) {
+      assert.equal(
+        parseStandaloneCitationLabel(raw)?.sourceLabel,
+        sourceLabel,
+        raw,
+      );
+    }
+  });
+
+  it("does not read prose or emphasis as a source label", function () {
+    for (const raw of [
+      "— In 2020, the authors showed that drift persisted.",
+      "— which, as noted above, matters",
+      "— Indeed",
+      "— Smith",
+      "Smith et al., 2020",
+      "**Smith et al. showed this in 2020**",
+      "*Note: this matters, as the authors say*",
+      "**(Figure 1)**",
+      "— (Methods)",
+      "*(Smith, 2020)",
+      "- Wang, Li and Zhao. Decoding drift. Neuron, 2019",
+      "— the effect persisted until 2020",
+      "— Data were collected between 2018 and 2020",
+      "— Smith et al. replicated this in 2020",
+      "-- this was true by 2020",
+      "— as reported in 2019",
+    ]) {
+      assert.isNull(parseStandaloneCitationLabel(raw), raw);
+    }
+  });
+
   it("normalizes matching keys for ranking and compatibility", function () {
     assert.equal(normalizeCitationLabel("(Smith, 2020)"), "(smith, 2020)");
     assert.equal(normalizeCitationKey(" Smith 2020 "), "smith2020");

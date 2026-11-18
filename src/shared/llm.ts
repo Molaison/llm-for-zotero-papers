@@ -1,3 +1,4 @@
+import type { CprChartWidget } from "../utils/cprRichWidgets";
 import type {
   ReasoningLevel,
   ReasoningProvider,
@@ -19,9 +20,19 @@ export type TextContent = {
 
 export type MessageContent = string | (TextContent | ImageContent)[];
 
+/** Local durable file identity. Never serialize these fields to a provider. */
+export type ChatFileAttachment = {
+  name: string;
+  mimeType?: string;
+  storedPath?: string;
+  contentHash?: string;
+};
+
 export type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: MessageContent;
+  /** Internal only; consumed exclusively by API-key Responses preparation. */
+  fileAttachments?: ChatFileAttachment[];
 };
 
 export type ReasoningConfig = {
@@ -86,4 +97,6 @@ export type ModelTurnOutcome = {
   text: string;
   completion: ModelTurnCompletion;
   continuationState?: unknown;
+  /** Validated declarative widgets from a completed CPR response. */
+  richWidgets?: CprChartWidget[];
 };

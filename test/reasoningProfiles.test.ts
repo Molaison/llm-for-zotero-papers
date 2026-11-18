@@ -520,6 +520,61 @@ describe("reasoningProfiles", function () {
       assert.equal(haiku45.preferredMode, "manual");
     });
 
+    it("knows which Claude models think when thinking is omitted, and which can switch it off", function () {
+      // https://platform.claude.com/docs/en/build-with-claude/thinking
+      // (checked 2026-10-14): every 5.x model thinks when `thinking` is
+      // omitted; Opus 4.x does not. Only Haiku 5.5 gets an Off level — Opus
+      // 5.5 and Fable reject `disabled`, Sonnet 5.5 rejects it, and Opus 5
+      // leaks thinking tags with it — so a 5.5 id must never fall into an
+      // older family's rule.
+      const ALL = ["low", "medium", "high", "xhigh", "max"];
+      const cases: Array<[string, boolean, boolean, string[]]> = [
+        // [model, thinking on when omitted, has Off, levels]
+        ["claude-opus-5", true, false, ALL],
+        ["claude-opus-5-5", true, false, ALL],
+        ["claude-sonnet-5", true, false, ALL],
+        ["claude-sonnet-5-5", true, false, ALL],
+        ["claude-haiku-5-5", true, true, ["low", "medium", "high", "max"]],
+        ["claude-fable-5-1", true, false, ALL],
+        ["claude-opus-4-8", false, false, ALL],
+        ["claude-sonnet-5-20260401", true, false, ALL],
+        [
+          "anthropic.claude-haiku-5-5",
+          true,
+          true,
+          ["low", "medium", "high", "max"],
+        ],
+      ];
+      for (const [model, onWhenOmitted, hasOff, expectedLevels] of cases) {
+        const profile = getAnthropicReasoningProfileForModel(model);
+        assert.equal(
+          Boolean(profile.thinkingOnWhenOmitted),
+          onWhenOmitted,
+          `${model} thinking on when omitted`,
+        );
+        assert.equal(
+          Boolean(profile.supportsDisabledThinking),
+          hasOff,
+          `${model} Off`,
+        );
+        assert.deepEqual(
+          getRuntimeReasoningOptionsForModel("anthropic", model).map(
+            (option) => option.level,
+          ),
+          expectedLevels,
+          model,
+        );
+      }
+      // An unseen id keeps today's behaviour: older Claude ids that no rule
+      // names (claude-3-5-sonnet) land here, and must not be sent thinking.
+      assert.isFalse(
+        Boolean(
+          getAnthropicReasoningProfileForModel("claude-unknown-3")
+            .thinkingOnWhenOmitted,
+        ),
+      );
+    });
+
     it("gives an unknown Claude model the current flagship's levels", function () {
       // Opus 5 / Sonnet 5 / Fable 5.1 all use adaptive thinking, so a Claude
       // id we have not seen is assumed to as well rather than being reported

@@ -294,8 +294,10 @@ describe("public agent API runTurn endings", function () {
   });
 
   it("rejects with the provider's own error when the provider failed", async function () {
+    // A status the runtime does not retry: a 429 or 5xx is retried and then
+    // ends the turn as connection_lost (turnBoundary.ts, Rule 4).
     class ProviderError extends Error {
-      readonly status = 503;
+      readonly status = 401;
     }
     const thrown = new ProviderError("provider down");
     const api = await publicApiOver(async () => {

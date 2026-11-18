@@ -86,4 +86,69 @@ describe("selected text context normalization", function () {
     assert.equal(contexts[1]?.source, "note");
     assert.equal(contexts[1]?.noteContext?.noteItemKey, "ABCD1234");
   });
+
+  it("keeps a chip's question trimmed, space-collapsed, line-preserving, and capped", function () {
+    const longQuestion = "q".repeat(2500);
+    const contexts = normalizeSelectedTextContexts([
+      {
+        text: "Quoted text",
+        source: "pdf",
+        userQuery: "  What does\n\n this   mean?  ",
+      },
+      { text: "Long question", source: "model", userQuery: longQuestion },
+    ]);
+
+    assert.equal(contexts[0]?.userQuery, "What does\n\nthis mean?");
+    assert.lengthOf(contexts[1]?.userQuery || "", 2000);
+  });
+
+  it("keeps line breaks in a multi-line question", function () {
+    const contexts = normalizeSelectedTextContexts([
+      {
+        text: "Quoted text",
+        source: "pdf",
+        userQuery: "  First\t  line  \r\n   second line \n\n\n\n third  ",
+      },
+    ]);
+
+    assert.equal(contexts[0]?.userQuery, "First line\nsecond line\n\nthird");
+  });
+
+  it("leaves the question field absent when it is empty or not text", function () {
+    const contexts = normalizeSelectedTextContexts([
+      { text: "No question", source: "pdf" },
+      { text: "Blank question", source: "pdf", userQuery: "   " },
+      { text: "Wrong type", source: "pdf", userQuery: 42 },
+    ]);
+
+    for (const context of contexts) {
+      assert.notProperty(context, "userQuery");
+    }
+  });
+
+  it("round-trips a chip's question through JSON storage and synthesis", function () {
+    const stored = JSON.parse(
+      JSON.stringify(
+        normalizeSelectedTextContexts([
+          {
+            text: "Stored quote",
+            source: "pdf",
+            contextItemId: 50,
+            pageIndex: 2,
+            userQuery: "Why is this true?",
+          },
+          { text: "Model quote", source: "model" },
+        ]),
+      ),
+    );
+
+    const contexts = synthesizeSelectedTextContexts({
+      selectedTextContexts: stored,
+      selectedTexts: ["Stored quote", "Model quote"],
+    });
+
+    assert.equal(contexts[0]?.userQuery, "Why is this true?");
+    assert.equal(contexts[0]?.pageIndex, 2);
+    assert.notProperty(contexts[1], "userQuery");
+  });
 });

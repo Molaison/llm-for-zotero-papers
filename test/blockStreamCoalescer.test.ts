@@ -5,6 +5,59 @@ import {
 } from "../src/modules/contextPanel/blockStreamCoalescer";
 
 describe("blockStreamCoalescer", function () {
+  it("releases the entire available chunk within 120 ms by default", function () {
+    const blocks: string[] = [];
+    let tick: (() => void) | undefined;
+    let delay = 0;
+    const coalescer = createBlockStreamCoalescer({
+      onBlock: (text) => blocks.push(text),
+      setTimer: (run, ms) => {
+        tick = run;
+        delay = ms;
+        return 1;
+      },
+      clearTimer: () => {
+        tick = undefined;
+      },
+    });
+    const text =
+      "Several words arrive together so the reader can see a complete chunk.";
+    for (const word of text.match(/\S+\s*/gu)!) coalescer.pushText(word);
+    assert.equal(delay, 120);
+    assert.isEmpty(blocks);
+    const run = tick!;
+    tick = undefined;
+    run();
+    assert.deepEqual(blocks, [text]);
+    assert.isFalse(coalescer.hasPending());
+    assert.isUndefined(tick);
+  });
+
+  it("collects a larger readable block before an early size-based update", function () {
+    const blocks: string[] = [];
+    const coalescer = createBlockStreamCoalescer({
+      maxWaitMs: 0,
+      onBlock: (text) => blocks.push(text),
+    });
+    coalescer.pushText("word ".repeat(72));
+    assert.isEmpty(blocks);
+    coalescer.pushText("word ".repeat(24));
+    assert.deepEqual(blocks, ["word ".repeat(96)]);
+  });
+
+  it("combines short paragraphs into one readable update", function () {
+    const blocks: string[] = [];
+    const coalescer = createBlockStreamCoalescer({
+      maxWaitMs: 0,
+      onBlock: (text) => blocks.push(text),
+    });
+    const paragraph = `${"word ".repeat(40)}\n\n`;
+    coalescer.pushText(paragraph);
+    assert.isEmpty(blocks);
+    coalescer.pushText(paragraph);
+    assert.deepEqual(blocks, [paragraph + paragraph]);
+  });
+
   it("coalesces adjacent tiny deltas until an event boundary", function () {
     const blocks: Array<{ text: string; reason: BlockStreamFlushReason }> = [];
     const coalescer = createBlockStreamCoalescer({
@@ -42,7 +95,7 @@ describe("blockStreamCoalescer", function () {
   });
 
   for (const { label, options, limit } of [
-    { label: "default", options: {}, limit: 800 },
+    { label: "default", options: {}, limit: 1200 },
     { label: "custom", options: { hardCapChars: 8 }, limit: 8 },
   ]) {
     it(`flushes uninterrupted text at the ${label} hard cap`, function () {

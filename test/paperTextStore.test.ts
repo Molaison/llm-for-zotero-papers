@@ -219,9 +219,15 @@ describe("paper text store", function () {
       }
     });
 
-    it("borrow evicts on release only an entry that was absent when borrowed", function () {
+    it("borrow releases its exclusive load-owned entry but keeps a pre-existing entry", async function () {
       const releaseFresh = paperTextStore.borrow(9540);
-      pdfTextCache.set(9540, fakeContext("mineru"));
+      const fresh = fakeContext("mineru");
+      await paperTextStore.load(
+        item(9540),
+        { silentLoad: true, borrowedBy: releaseFresh },
+        async (_item, _options, write) => write(fresh),
+      );
+      assert.strictEqual(paperTextStore.peek(9540), fresh);
       releaseFresh();
       assert.isFalse(
         pdfTextCache.has(9540),
@@ -231,12 +237,181 @@ describe("paper text store", function () {
       const held = fakeContext("mineru");
       pdfTextCache.set(9541, held);
       const releaseHeld = paperTextStore.borrow(9541);
+      await paperTextStore.load(
+        item(9541),
+        { silentLoad: true, borrowedBy: releaseHeld },
+        async () => assert.fail("a pre-existing entry must not be extracted"),
+      );
       releaseHeld();
       assert.strictEqual(
         pdfTextCache.get(9541),
         held,
         "someone else's load stays",
       );
+    });
+
+    it("keeps a silent inflight load adopted by a foreground waiter after its borrower releases", async function () {
+      const release = paperTextStore.borrow(9542);
+      const context = fakeContext("mineru");
+      let finishExtraction!: () => void;
+      const extractionGate = new Promise<void>((resolve) => {
+        finishExtraction = resolve;
+      });
+      let extractionCount = 0;
+      const background = paperTextStore.load(
+        item(9542),
+        { silentLoad: true, borrowedBy: release },
+        async (_item, _options, write) => {
+          extractionCount += 1;
+          await extractionGate;
+          write(context);
+        },
+      );
+      const backgroundTask = pdfTextLoadingTasks.get(9542);
+      assert.exists(backgroundTask);
+      const foreground = paperTextStore.load(
+        item(9542),
+        undefined,
+        async (_item, _options, write) => {
+          extractionCount += 1;
+          write(fakeContext("zotero-worker"));
+        },
+      );
+      assert.strictEqual(pdfTextLoadingTasks.get(9542), backgroundTask);
+      // Release while extraction is still blocked: the foreground waiter must
+      // already have adopted this task, not only its eventual cached entry.
+      release();
+      finishExtraction();
+      await Promise.all([background, foreground]);
+      release();
+      assert.equal(extractionCount, 1, "the foreground shares the silent load");
+      assert.strictEqual(paperTextStore.peek(9542), context);
+    });
+
+    it("keeps an invalidation replacement when an older borrow releases", async function () {
+      const releaseOld = paperTextStore.borrow(9543);
+      await paperTextStore.load(
+        item(9543),
+        { silentLoad: true, borrowedBy: releaseOld },
+        async (_item, _options, write) => write(fakeContext("zotero-worker")),
+      );
+      paperTextStore.invalidateMineruRuntimeText(9543);
+      const replacement = fakeContext("mineru");
+      const releaseNew = paperTextStore.borrow(9543);
+      await paperTextStore.load(
+        item(9543),
+        { silentLoad: true, borrowedBy: releaseNew },
+        async (_item, _options, write) => write(replacement),
+      );
+      releaseOld();
+      assert.strictEqual(paperTextStore.peek(9543), replacement);
+      releaseNew();
+      assert.isFalse(
+        paperTextStore.has(9543),
+        "the new owner can still release",
+      );
+    });
+
+    it("does not turn a released background joiner into a foreground adopter", async function () {
+      const creatorRelease = paperTextStore.borrow(9544);
+      const joinerRelease = paperTextStore.borrow(9544);
+      let finishExtraction!: () => void;
+      const extractionGate = new Promise<void>((resolve) => {
+        finishExtraction = resolve;
+      });
+      let extractionCount = 0;
+      const extract = async (
+        _item: Zotero.Item,
+        _options: unknown,
+        write: (context: PdfContext) => void,
+      ) => {
+        extractionCount += 1;
+        await extractionGate;
+        write(fakeContext("mineru"));
+      };
+      const creator = paperTextStore.load(
+        item(9544),
+        { silentLoad: true, borrowedBy: creatorRelease },
+        extract,
+      );
+      const joiner = paperTextStore.load(
+        item(9544),
+        { silentLoad: true, borrowedBy: joinerRelease },
+        extract,
+      );
+      joinerRelease();
+      finishExtraction();
+      await Promise.all([creator, joiner]);
+      assert.isTrue(
+        paperTextStore.has(9544),
+        "the creator still owns the text",
+      );
+      creatorRelease();
+      assert.equal(extractionCount, 1);
+      assert.isFalse(paperTextStore.has(9544));
+    });
+
+    it("does not reload when all background inflight borrowers have released", async function () {
+      const creatorRelease = paperTextStore.borrow(9545);
+      const joinerRelease = paperTextStore.borrow(9545);
+      let finishExtraction!: () => void;
+      const extractionGate = new Promise<void>((resolve) => {
+        finishExtraction = resolve;
+      });
+      let extractionCount = 0;
+      const extract = async (
+        _item: Zotero.Item,
+        _options: unknown,
+        write: (context: PdfContext) => void,
+      ) => {
+        extractionCount += 1;
+        await extractionGate;
+        write(fakeContext("mineru"));
+      };
+      const creator = paperTextStore.load(
+        item(9545),
+        { silentLoad: true, borrowedBy: creatorRelease },
+        extract,
+      );
+      const joiner = paperTextStore.load(
+        item(9545),
+        { silentLoad: true, borrowedBy: joinerRelease },
+        extract,
+      );
+      creatorRelease();
+      joinerRelease();
+      finishExtraction();
+      await Promise.all([creator, joiner]);
+      assert.equal(
+        extractionCount,
+        1,
+        "the released joiner must not re-extract",
+      );
+      assert.isFalse(paperTextStore.has(9545));
+      assert.isFalse(pdfTextLoadingTasks.has(9545));
+    });
+
+    it("remembers external adoption of the same object before its first owned write", async function () {
+      const release = paperTextStore.borrow(9546);
+      const shared = fakeContext("mineru");
+      let finishExtraction!: () => void;
+      const extractionGate = new Promise<void>((resolve) => {
+        finishExtraction = resolve;
+      });
+      const background = paperTextStore.load(
+        item(9546),
+        { silentLoad: true, borrowedBy: release },
+        async (_item, _options, write) => {
+          await extractionGate;
+          write(shared);
+        },
+      );
+      paperTextStore.write(9546, shared);
+      assert.strictEqual(paperTextStore.peek(9546), shared);
+      finishExtraction();
+      await background;
+      release();
+      assert.strictEqual(paperTextStore.peek(9546), shared);
     });
 
     it("discardEmptyEntry drops only an entry without text and leaves its load alone", function () {

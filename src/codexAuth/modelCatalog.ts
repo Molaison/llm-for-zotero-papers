@@ -6,16 +6,22 @@ import {
   type CodexReasoningEffort,
 } from "../codex/catalogSelection";
 import type { ReasoningConfig } from "../shared/llm";
+import type { ModelCapabilityLimits } from "../modelCapabilities/types";
 import {
   MODEL_CAPABILITY_MAX_TOKEN_LIMIT,
   publishModelCapabilityCatalog,
 } from "../modelCapabilities";
 import {
   CODEX_DIRECT_RESPONSES_URL,
-  CODEX_DIRECT_MODELS_URL,
   fetchWithCodexAuth,
+  resolveCodexDirectModelsUrl,
+  resolveCodexAuthSession,
+  isSameCodexAuthSession,
+  type CodexAuthSession,
   type CodexAuthDependencies,
 } from "./auth";
+
+import { assertNotAborted, waitForCodexTask } from "./lifecycle";
 
 const CATALOG_TTL_MS = 60_000;
 const CATALOG_TIMEOUT_MS = 5_000;
@@ -56,7 +62,27 @@ const EMPTY_SNAPSHOT: CodexDirectCatalogSnapshot = {
 };
 
 let catalogSnapshot = EMPTY_SNAPSHOT;
-let catalogRequest: Promise<CodexDirectCatalogSnapshot> | null = null;
+type CatalogRequest = {
+  session: CodexAuthSession;
+  controller: AbortController;
+  promise: Promise<CodexDirectCatalogSnapshot>;
+};
+
+type CatalogLoad = {
+  session?: CodexAuthSession;
+  promise: Promise<CodexDirectCatalogSnapshot>;
+};
+
+let catalogRequest: CatalogRequest | null = null;
+let snapshotSession: CodexAuthSession | undefined;
+let latestLoad: CatalogLoad | null = null;
+let catalogDependenciesForTests: CodexAuthDependencies | undefined;
+
+export function setCodexDirectCatalogDependenciesForTests(
+  dependencies?: CodexAuthDependencies,
+): void {
+  catalogDependenciesForTests = dependencies;
+}
 const catalogSubscribers = new Set<
   (snapshot: CodexDirectCatalogSnapshot) => void
 >();
@@ -184,93 +210,214 @@ export function subscribeToCodexDirectCatalog(
   return () => catalogSubscribers.delete(subscriber);
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("Codex Direct model catalog timed out")),
-      timeoutMs,
-    );
-    void promise.then(
-      (value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      },
-    );
-  });
-}
-
 export async function loadCodexDirectCatalog(
   options: LoadCodexDirectCatalogOptions = {},
 ): Promise<CodexDirectCatalogSnapshot> {
+  options = { ...catalogDependenciesForTests, ...options };
   const now = options.now || Date.now;
-  if (
-    !options.force &&
-    catalogSnapshot.status === "ready" &&
-    catalogSnapshot.fetchedAt !== undefined &&
-    now() - catalogSnapshot.fetchedAt < CATALOG_TTL_MS
-  ) {
-    return catalogSnapshot;
-  }
-  if (catalogRequest) return catalogRequest;
-
-  publishCatalogSnapshot({ status: "loading", models: [] });
-  catalogRequest = withTimeout(
-    (async () => {
-      const response = await fetchWithCodexAuth(
-        CODEX_DIRECT_MODELS_URL,
-        { headers: { Accept: "application/json" } },
-        options,
-      );
-      if (!response.ok) {
-        throw new Error(
-          `Codex Direct catalog failed: ${response.status} ${response.statusText} - ${await response.text()}`,
-        );
-      }
-      const models = normalizeCodexDirectCatalog(
-        (await response.json()) as unknown,
-      );
-      return models;
-    })(),
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(new Error("Codex Direct model catalog timed out")),
     options.timeoutMs ?? CATALOG_TIMEOUT_MS,
-  )
-    .then((models) => {
-      publishModelCapabilityCatalog(
-        CODEX_DIRECT_CAPABILITY_IDENTITY,
-        models.map((model) => ({
-          id: model.model,
-          displayName: model.displayName,
-          source: "live" as const,
-          ...(model.contextWindow
-            ? { limits: { contextWindowTokens: model.contextWindow } }
-            : {}),
-        })),
-      );
-      const snapshot: CodexDirectCatalogSnapshot = {
-        status: "ready",
-        models,
-        fetchedAt: now(),
-      };
-      publishCatalogSnapshot(snapshot);
-      return snapshot;
-    })
-    .catch((error: unknown) => {
-      const snapshot: CodexDirectCatalogSnapshot = {
-        status: "error",
-        models: [],
-        error: error instanceof Error ? error.message : String(error),
-      };
-      publishCatalogSnapshot(snapshot);
-      throw error;
-    })
-    .finally(() => {
-      catalogRequest = null;
-    });
+  );
+  const load: CatalogLoad = { promise: Promise.resolve(EMPTY_SNAPSHOT) };
+  latestLoad = load;
+  load.promise = waitForCodexTask(
+    Promise.resolve().then(async () => {
+      let session: CodexAuthSession;
+      try {
+        session = await resolveCodexAuthSession({
+          ...options,
+          signal: controller.signal,
+        });
+        assertNotAborted(controller.signal);
+      } catch (error) {
+        if (latestLoad === load) {
+          const previous = catalogRequest;
+          catalogRequest = null;
+          previous?.controller.abort(
+            new Error("Codex catalog login changed; please retry"),
+          );
+          snapshotSession = undefined;
+          publishModelCapabilityCatalog(CODEX_DIRECT_CAPABILITY_IDENTITY, []);
+          publishCatalogSnapshot({
+            status: "error",
+            models: [],
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        throw error;
+      }
+      load.session = session;
+      if (latestLoad !== load) {
+        const newer = latestLoad;
+        if (!newer)
+          throw new Error("Codex catalog load superseded; please retry");
+        const result = await waitForCodexTask(newer.promise, controller.signal);
+        assertNotAborted(controller.signal);
+        if (!newer.session || !isSameCodexAuthSession(session, newer.session)) {
+          throw new Error("Codex catalog login changed; please retry");
+        }
+        return result;
+      }
+      if (
+        catalogRequest &&
+        isSameCodexAuthSession(session, catalogRequest.session)
+      ) {
+        return waitForCodexTask(catalogRequest.promise, controller.signal);
+      }
+      if (
+        !options.force &&
+        snapshotSession &&
+        isSameCodexAuthSession(session, snapshotSession) &&
+        catalogSnapshot.status === "ready" &&
+        catalogSnapshot.fetchedAt !== undefined &&
+        now() - catalogSnapshot.fetchedAt < CATALOG_TTL_MS
+      )
+        return catalogSnapshot;
 
-  return catalogRequest;
+      const previous = catalogRequest;
+      catalogRequest = null;
+      previous?.controller.abort(
+        new Error("Codex catalog login changed; please retry"),
+      );
+      const owner: CatalogRequest = {
+        session,
+        controller,
+        promise: Promise.resolve(EMPTY_SNAPSHOT),
+      };
+      catalogRequest = owner;
+      snapshotSession = session;
+      const assertOwner = () => {
+        assertNotAborted(controller.signal);
+        if (catalogRequest !== owner)
+          throw new Error("Codex catalog load superseded; please retry");
+      };
+      owner.promise = waitForCodexTask(
+        Promise.resolve().then(async () => {
+          assertOwner();
+          publishModelCapabilityCatalog(CODEX_DIRECT_CAPABILITY_IDENTITY, []);
+          publishCatalogSnapshot({ status: "loading", models: [] });
+          assertOwner();
+          const url = await resolveCodexDirectModelsUrl(options);
+          assertOwner();
+          const response = await fetchWithCodexAuth(
+            url,
+            { headers: { Accept: "application/json" } },
+            { ...options, signal: controller.signal, session },
+          );
+          assertOwner();
+          if (!response.ok) {
+            const detail = await response.text();
+            assertOwner();
+            throw new Error(
+              `Codex Direct catalog failed: ${response.status} ${response.statusText} - ${detail}`,
+            );
+          }
+          const payload = await response.json();
+          assertOwner();
+          const models = normalizeCodexDirectCatalog(payload);
+          publishModelCapabilityCatalog(
+            CODEX_DIRECT_CAPABILITY_IDENTITY,
+            models.map((model) => ({
+              id: model.model,
+              displayName: model.displayName,
+              source: "live" as const,
+            })),
+          );
+          const snapshot: CodexDirectCatalogSnapshot = {
+            status: "ready",
+            models,
+            fetchedAt: now(),
+          };
+          publishCatalogSnapshot(snapshot);
+          return snapshot;
+        }),
+        controller.signal,
+      )
+        .catch((error: unknown) => {
+          if (catalogRequest === owner) {
+            publishModelCapabilityCatalog(CODEX_DIRECT_CAPABILITY_IDENTITY, []);
+            publishCatalogSnapshot({
+              status: "error",
+              models: [],
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          throw error;
+        })
+        .finally(() => {
+          if (catalogRequest === owner) catalogRequest = null;
+        });
+      return owner.promise;
+    }),
+    controller.signal,
+  ).finally(() => clearTimeout(timeout));
+  return load.promise;
+}
+
+export type CodexDirectRequestCatalog = Readonly<{
+  assertModelAvailable: (model: string) => void;
+  getModelLimits: (
+    model: string,
+  ) => Readonly<ModelCapabilityLimits> | undefined;
+  sanitizeReasoning: (
+    model: string,
+    reasoning: ReasoningConfig | undefined,
+  ) => ReasoningConfig | undefined;
+}>;
+
+export function captureCodexDirectRequestCatalog(
+  session?: CodexAuthSession,
+): CodexDirectRequestCatalog {
+  const models =
+    session &&
+    snapshotSession &&
+    catalogSnapshot.status === "ready" &&
+    isSameCodexAuthSession(session, snapshotSession)
+      ? new Map(
+          catalogSnapshot.models.map((model) => [
+            model.model.toLowerCase(),
+            {
+              efforts: model.supportedReasoningEfforts.map(
+                (effort) => effort.value,
+              ),
+              limits: model.contextWindow
+                ? Object.freeze({
+                    contextWindowTokens: model.contextWindow,
+                    inputTokens: model.contextWindow,
+                  })
+                : undefined,
+            },
+          ]),
+        )
+      : undefined;
+  return Object.freeze({
+    assertModelAvailable(model: string): void {
+      if (!models || models.has(model.trim().toLowerCase())) return;
+      throw new Error(
+        `The Codex Direct model "${model}" is not available in the current catalog. Select another model before sending.`,
+      );
+    },
+    getModelLimits(model: string): Readonly<ModelCapabilityLimits> | undefined {
+      return models?.get(model.trim().toLowerCase())?.limits;
+    },
+    sanitizeReasoning(
+      model: string,
+      reasoning: ReasoningConfig | undefined,
+    ): ReasoningConfig | undefined {
+      if (!models) return reasoning ? { ...reasoning } : undefined;
+      if (!reasoning?.effort) return undefined;
+      return buildCodexReasoningConfig(
+        reconcileCodexReasoningChoice(
+          reasoning.effort,
+          buildCodexReasoningChoices({
+            efforts: models.get(model.trim().toLowerCase())?.efforts || [],
+          }),
+        ),
+      );
+    },
+  });
 }
 
 export function getCodexDirectCatalogModel(
@@ -323,7 +470,11 @@ export function sanitizeCodexDirectReasoningConfig(
 }
 
 export function resetCodexDirectCatalogForTests(): void {
+  latestLoad = null;
+  snapshotSession = undefined;
+  const previous = catalogRequest;
   catalogRequest = null;
+  previous?.controller.abort(new Error("Codex catalog reset"));
   publishModelCapabilityCatalog(CODEX_DIRECT_CAPABILITY_IDENTITY, []);
   publishCatalogSnapshot(EMPTY_SNAPSHOT);
 }

@@ -23,25 +23,37 @@ export type SurfaceBridge<T> = {
 };
 
 export function createSurfaceBridge<T>(name: string): SurfaceBridge<T> {
-  let activeAdapter: T | null = null;
+  type Registration = {
+    adapter: T | null;
+    previous: Registration | null;
+    disposed: boolean;
+  };
+  let active: Registration | null = null;
   return {
     configure(adapter) {
-      const previous = activeAdapter;
-      activeAdapter = adapter;
+      const registration: Registration = {
+        adapter,
+        previous: active,
+        disposed: false,
+      };
+      active = registration;
       return () => {
-        if (activeAdapter === adapter) activeAdapter = previous;
+        registration.disposed = true;
+        // Track registrations, not adapter equality (the same adapter can be
+        // installed twice). Never restore an already-disposed surface.
+        while (active?.disposed) active = active.previous;
       };
     },
     require() {
-      if (!activeAdapter) {
+      if (!active?.adapter) {
         throw new Error(
           `The ${name} adapter is not configured for this application surface.`,
         );
       }
-      return activeAdapter;
+      return active.adapter;
     },
     current() {
-      return activeAdapter;
+      return active?.adapter ?? null;
     },
   };
 }

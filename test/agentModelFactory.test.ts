@@ -30,6 +30,58 @@ describe("agent model factory", function () {
     assert.equal(adapter.constructor.name, "AnthropicMessagesAgentAdapter");
   });
 
+  it("preserves explicit Responses on custom hosts without enabling file uploads", function () {
+    for (const apiBase of [
+      "https://custom.provider.example/v1",
+      "https://custom.provider.example/v1/responses",
+    ]) {
+      const request = makeRequest({
+        authMode: "api_key",
+        providerProtocol: "responses_api",
+        apiBase,
+      });
+      const adapter = createAgentModelAdapter(request);
+
+      assert.equal(resolveRequestProviderProtocol(request), "responses_api");
+      assert.equal(
+        adapter.constructor.name,
+        "OpenAIResponsesAgentAdapter",
+        apiBase,
+      );
+      assert.isFalse(adapter.getCapabilities(request).fileInputs, apiBase);
+      assert.isFalse(
+        adapter.getCapabilities(request).contentInputs.nativeFiles,
+        apiBase,
+      );
+    }
+  });
+
+  it("keeps custom host defaults on Chat unless the URL ends in /responses", function () {
+    for (const [apiBase, expectedAdapter] of [
+      ["https://custom.provider.example/v1", "OpenAIChatCompatAgentAdapter"],
+      [
+        "https://custom.provider.example/v1/responses",
+        "OpenAIResponsesAgentAdapter",
+      ],
+    ]) {
+      const adapter = createAgentModelAdapter(
+        makeRequest({ authMode: "api_key", apiBase }),
+      );
+      assert.equal(adapter.constructor.name, expectedAdapter, apiBase);
+    }
+  });
+
+  it("keeps an explicit Chat override on a custom Responses URL", function () {
+    const adapter = createAgentModelAdapter(
+      makeRequest({
+        authMode: "api_key",
+        providerProtocol: "openai_chat_compat",
+        apiBase: "https://custom.provider.example/v1/responses",
+      }),
+    );
+    assert.equal(adapter.constructor.name, "OpenAIChatCompatAgentAdapter");
+  });
+
   it("routes official Gemini chat-compatible configs through the native adapter", function () {
     const adapter = createAgentModelAdapter(
       makeRequest({

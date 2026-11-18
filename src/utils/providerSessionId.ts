@@ -46,13 +46,15 @@ function randomHex(byteLength: number): string {
 }
 
 /** One salt per install, minted on first use and kept in preferences. */
-function resolveSalt(): string {
+function resolveSalt(): string | undefined {
   const store = prefs();
-  const existing = store?.get?.(SESSION_SALT_KEY, true);
+  if (typeof store?.get !== "function") return undefined;
+  const existing = store.get(SESSION_SALT_KEY, true);
   if (typeof existing === "string" && existing.length >= 16) return existing;
+  if (typeof store.set !== "function") return undefined;
   const salt = randomHex(16);
-  store?.set?.(SESSION_SALT_KEY, salt, true);
-  return salt;
+  store.set(SESSION_SALT_KEY, salt, true);
+  return store.get(SESSION_SALT_KEY, true) === salt ? salt : undefined;
 }
 
 const sessionIdCache = new Map<string, string>();
@@ -92,11 +94,14 @@ export async function resolveProviderSessionId(
   }
   const key = String(conversationKey).trim();
   if (!key) return undefined;
-  const cached = sessionIdCache.get(key);
+  const salt = resolveSalt();
+  if (!salt) return undefined;
+  const cacheKey = `${salt}:${key}`;
+  const cached = sessionIdCache.get(cacheKey);
   if (cached) return cached;
-  const derived = await digest(`${resolveSalt()}:${key}`);
+  const derived = await digest(cacheKey);
   if (!derived) return undefined;
-  sessionIdCache.set(key, derived);
+  sessionIdCache.set(cacheKey, derived);
   return derived;
 }
 

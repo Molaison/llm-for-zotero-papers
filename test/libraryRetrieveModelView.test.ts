@@ -8,12 +8,14 @@ import type {
   LibraryRetrieveSnippet,
 } from "../src/agent/services/libraryRetrieveService";
 import { DEEP_SYNTHESIS_MAX_PAPERS } from "../src/shared/libraryChatReadStrategy";
+import { estimateTextTokens } from "../src/utils/modelInputCap";
 
 type PaperSpec = {
   status: LibraryRetrievePaperMatchStatus;
   passages: number;
   /** Every passage is the paper's leading passage: nothing in it matched. */
   lead?: boolean;
+  passageStatus?: LibraryRetrievePaperMatch["passageStatus"];
 };
 
 const ROOMY = 1_000_000;
@@ -32,6 +34,7 @@ function fullResult(
     returnedSnippetCount: spec.passages,
     confidence: spec.status === "strong" ? "high" : "low",
     whyMatched: "library index: 4 matching passage(s)",
+    ...(spec.passageStatus ? { passageStatus: spec.passageStatus } : {}),
   }));
   const snippets: LibraryRetrieveSnippet[] = specs.flatMap((spec, i) =>
     Array.from({ length: spec.passages }, (_, k) => ({
@@ -193,7 +196,7 @@ describe("library_retrieve model view", function () {
         "snippet",
         "snippetId",
       ],
-      "a passage keeps what the answer cites and quotes; the chunk text, scores and match diagnostics stay behind the handle",
+      "a passage keeps what the answer cites and quotes, and where its text came from; the chunk text, scores and match diagnostics stay behind the handle",
     );
     assert.deepEqual(
       content.quoteCitations.map((citation: { id: string }) => citation.id),
@@ -218,6 +221,48 @@ describe("library_retrieve model view", function () {
     assert.equal(content.answerContract.indexedTextCoverage, "complete");
     assert.isBelow(size(content), size(result) / 4);
   });
+
+  for (const intent of ["verify", "summarize"] as const) {
+    it(`${intent}: lists the matching papers no passage was read for, by status, up to a bound`, function () {
+      const result = fullResult(intent, [
+        { status: "strong", passages: 1 },
+        { status: "strong", passages: 0, passageStatus: "not_returned_budget" },
+        { status: "weak", passages: 0, passageStatus: "no_pdf_attachment" },
+        { status: "mentions_only", passages: 0 },
+        {
+          status: "not_enough_evidence",
+          passages: 0,
+          passageStatus: "no_pdf_attachment",
+        },
+      ]);
+      const { content } = view(result);
+      assert.deepEqual(ids(content.paperMatches), ["1", "2", "3"]);
+      assert.deepEqual(
+        content.paperMatches.slice(1).map((row: Record<string, unknown>) => ({
+          title: row.title,
+          passageStatus: row.passageStatus,
+        })),
+        [
+          { title: "Paper 2 on drift", passageStatus: "not_returned_budget" },
+          { title: "Paper 3 on drift", passageStatus: "no_pdf_attachment" },
+        ],
+      );
+      assert.equal(content.omitted.paperMatches, 2);
+
+      const many = view(
+        fullResult(intent, [
+          { status: "strong", passages: 1 },
+          ...Array.from({ length: 40 }, () => ({
+            status: "strong" as const,
+            passages: 0,
+            passageStatus: "not_returned_budget" as const,
+          })),
+        ]),
+      ).content;
+      assert.lengthOf(many.paperMatches, 1 + 25);
+      assert.equal(many.omitted.paperMatches, 15, "the rest are counted");
+    });
+  }
 
   it("enumerate: lists every matching paper by id and title, each with its best passage, and counts unmatched leads", function () {
     const result = fullResult("enumerate", [
@@ -364,6 +409,35 @@ describe("library_retrieve model view", function () {
     }
   });
 
+  it("trims the deepest papers first and a paper's last passage only after every paper is down to one", function () {
+    const result = fullResult("summarize", [
+      { status: "strong", passages: 6 },
+      { status: "strong", passages: 6 },
+      { status: "strong", passages: 1 },
+    ]);
+    const roomy = view(result).content;
+    const room = estimateTextTokens(JSON.stringify(roomy)) - 500;
+    const kept = (content: Record<string, any>) =>
+      ["1", "2", "3"].map(
+        (itemId) =>
+          content.snippets.filter(
+            (s: LibraryRetrieveSnippet) => s.itemId === itemId,
+          ).length,
+      );
+    const [first, second, third] = kept(view(result, {}, room).content);
+    assert.isBelow(first + second, 12, "the room forced a trim");
+    assert.equal(third, 1, "the one-passage paper keeps its passage");
+    assert.include([0, 1], first - second, "the deep papers trim in turn");
+    const [onlyFirst, onlySecond, onlyThird] = kept(
+      view(result, {}, 1).content,
+    );
+    assert.deepEqual(
+      [onlyFirst, onlySecond, onlyThird],
+      [1, 0, 0],
+      "past one passage each, the lowest-ranked paper's goes first",
+    );
+  });
+
   it("stores every row with the rows it shows first, so the omitted rows start at the number shown", function () {
     const result = fullResult(
       "enumerate",
@@ -405,5 +479,23 @@ describe("library_retrieve model view", function () {
     );
     assert.deepEqual(ids(verify.content.paperMatches), ["2"]);
     assert.deepEqual(ids(verify.stored.paperMatches), ["2", "1"]);
+  });
+
+  it("marks only abstract passages with their source kind", function () {
+    const result = fullResult("enumerate", [
+      { status: "strong", passages: 1 },
+      { status: "possible", passages: 1 },
+    ]);
+    result.snippets[1] = {
+      ...result.snippets[1],
+      sourceKind: "abstract",
+      chunkKind: "abstract",
+    };
+    const { content } = view(result);
+    const byItem = new Map(
+      content.snippets.map((s: Record<string, unknown>) => [s.itemId, s]),
+    );
+    assert.notProperty(byItem.get("1") as object, "sourceKind");
+    assert.equal((byItem.get("2") as any).sourceKind, "abstract");
   });
 });

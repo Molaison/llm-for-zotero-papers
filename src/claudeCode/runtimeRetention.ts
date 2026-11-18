@@ -345,6 +345,12 @@ export async function releaseClaudeRuntimeForBody(
       },
     );
     void (async () => {
+      try {
+        await liveEntry.retainInFlight;
+      } catch {
+        // A late retain must settle before its matching release is sent.
+      }
+      if (!liveEntry.retainedRemotely) return;
       await updateClaudeRuntimeRetention(await getCoreRuntime(), {
         conversationKey: liveEntry.target.conversationKey,
         scope: liveEntry.target.scope,
@@ -352,6 +358,7 @@ export async function releaseClaudeRuntimeForBody(
         retain: false,
         probeId: liveEntry.probeId,
       });
+      liveEntry.retainedRemotely = false;
     })().catch(() => {});
   }, CLAUDE_RUNTIME_RELEASE_GRACE_MS);
 }

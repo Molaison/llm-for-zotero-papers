@@ -161,6 +161,96 @@ describe("utility LLM policy", function () {
     });
   });
 
+  it("switches Claude Haiku 5.5 thinking off for bounded utility calls", async function () {
+    // Haiku 5.5 thinks when `thinking` is omitted, and thinking spends the
+    // same max_tokens as the JSON: a 700-token digest came back truncated.
+    const captured = await capture({
+      model: "claude-haiku-5-5",
+      apiBase: "https://api.anthropic.com",
+      providerProtocol: "anthropic_messages",
+    });
+
+    assert.isTrue(captured.result.ok);
+    assert.deepEqual(captured.request.reasoning, {
+      provider: "anthropic",
+      level: "none",
+    });
+    assert.deepEqual(captured.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 200,
+    });
+  });
+
+  it("gives always-thinking Claude models the lowest effort and its reserve", async function () {
+    const plans = Object.fromEntries(
+      [
+        "claude-opus-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
+        "claude-opus-4-8",
+        "claude-sonnet-5-20260401",
+        "claude-haiku-4-5",
+      ].map((model) => [
+        model,
+        resolveUtilityReasoningPlan({
+          model,
+          apiBase: "https://api.anthropic.com",
+          providerProtocol: "anthropic_messages",
+        }),
+      ]),
+    );
+    const low = { reasoning: { provider: "anthropic", level: "low" } };
+    for (const model of [
+      "claude-opus-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5",
+      "claude-sonnet-5-5",
+      "claude-fable-5-1",
+      "claude-sonnet-5-20260401",
+    ]) {
+      assert.deepEqual(plans[model]?.reasoning, low.reasoning, model);
+      assert.isAtLeast(plans[model]?.reserveTokens ?? 0, 1024, model);
+    }
+    assert.deepEqual(plans["claude-haiku-5-5"], {
+      reasoning: { provider: "anthropic", level: "none" },
+      reserveTokens: 0,
+    });
+    // Off by default: nothing to send, nothing to reserve.
+    for (const model of ["claude-opus-4-8", "claude-haiku-4-5"]) {
+      assert.deepEqual(
+        plans[model],
+        { reasoning: undefined, reserveTokens: 0 },
+        model,
+      );
+    }
+
+    const captured = await capture({
+      model: "claude-opus-5-5",
+      apiBase: "https://api.anthropic.com",
+      providerProtocol: "anthropic_messages",
+    });
+    assert.deepEqual(captured.request.outputTokenLimit, {
+      mode: "custom",
+      tokens: 200 + 1024,
+    });
+  });
+
+  it("keeps a reserve but sends no Claude thinking control over a non-Messages protocol", function () {
+    // Anthropic thinking controls are only encoded for the Messages API; a
+    // relay still runs the model's own thinking inside max_tokens.
+    assert.deepEqual(
+      resolveUtilityReasoningPlan({
+        model: "anthropic/claude-haiku-5-5",
+        apiBase: "https://openrouter.ai/api/v1",
+        providerProtocol: "openai_chat_compat",
+      }),
+      { reasoning: undefined, reserveTokens: 1024 },
+    );
+  });
+
   it("uses disabled Gemini thinking when the model supports it and reserves numeric thinking otherwise", async function () {
     const flash = await capture({
       model: "gemini-2.5-flash",

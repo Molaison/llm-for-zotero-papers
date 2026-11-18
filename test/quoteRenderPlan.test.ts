@@ -24,6 +24,23 @@ describe("quoteRenderPlan", function () {
   const followingProse =
     "The problem is that chronic population imaging contradicts this premise.";
 
+  it("numbers occurrences under an id scope without changing unscoped ids", function () {
+    const markdown = `${duplicateAnchor}\n\n${followingProse}`;
+    const input = { markdown, quoteCitations: [duplicateCitation] };
+    const plain = buildQuoteRenderPlan(input);
+    const scoped = buildQuoteRenderPlan({
+      ...input,
+      occurrenceIdScope: "ab12cd34",
+    });
+    assert.equal(plain.occurrences[0].occurrenceId, "QO_0");
+    assert.include(plain.displayMarkdown, "[[quote-occurrence:QO_0]]");
+    assert.equal(scoped.occurrences[0].occurrenceId, "QO_ab12cd34.0");
+    assert.include(
+      scoped.displayMarkdown,
+      "[[quote-occurrence:QO_ab12cd34.0]]",
+    );
+  });
+
   it("renders a model-typed quote token whose id contains '.' or ':' as a card", function () {
     for (const id of ["x.y", "p:1", "Q1.a:2"]) {
       const citation = buildQuoteCitation({
@@ -603,5 +620,127 @@ describe("quoteRenderPlan", function () {
       plan.occurrences.map((occurrence) => occurrence.lookupText),
       [first, second],
     );
+  });
+
+  it("reads dash-led and emphasis-wrapped labels as source labels, not quote text", function () {
+    const quote =
+      "Representational drift was observed across all recorded sessions in the piriform cortex.";
+    for (const markdown of [
+      `> ${quote}\n> — Schoonover et al., 2021`,
+      `> ${quote}\n>\n> **(Schoonover et al., 2021)**`,
+      `> ${quote}\n\n*(Schoonover et al., 2021)*`,
+      `> ${quote}\n\n— Schoonover et al., 2021`,
+    ]) {
+      const plan = buildQuoteRenderPlan({ markdown });
+      assert.lengthOf(plan.occurrences, 1, markdown);
+      assert.equal(plan.occurrences[0].displayText, quote, markdown);
+      assert.equal(
+        plan.occurrences[0].citationLabel,
+        "(Schoonover et al., 2021)",
+        markdown,
+      );
+      assert.notInclude(plan.displayMarkdown, "Schoonover", markdown);
+    }
+  });
+
+  it("keeps a following prose line that starts with a name out of the quote card", function () {
+    const quote =
+      "Representational drift was observed across all recorded sessions in the piriform cortex.";
+    const prose =
+      "Schoonover et al. (2021) argue that this drift is not explained by behavior.";
+    const plan = buildQuoteRenderPlan({ markdown: `> ${quote}\n\n${prose}` });
+    assert.isEmpty(plan.occurrences);
+    assert.include(plan.displayMarkdown, `> ${quote}`);
+    assert.include(plan.displayMarkdown, prose);
+  });
+
+  it("splits an ellipsized blockquote before its standalone anchor instead of duplicating the card", function () {
+    const first =
+      "The previous assembly representation declined before the stable neuronal reassignment.";
+    const second =
+      "The new assembly representation rose before the change and became dominant afterward.";
+    const citation = buildQuoteCitation({
+      id: "Q_adjacent_ellipsis",
+      quoteText: `${first} Omitted source wording. ${second}`,
+      citationLabel: "(Asabuki and Clopath, 2024)",
+      sourceMatchKind: "exact",
+      sourceMatchSource: "context-text",
+      contextItemId: 3617,
+      itemId: 3616,
+    })!;
+    for (const ellipsis of ["…", "...", "[...]"]) {
+      const markdown = `> ${first} ${ellipsis} ${second}\n\n[[quote:${citation.id}]]\n\nFollowing discussion.`;
+      const plan = buildQuoteRenderPlan({
+        markdown,
+        quoteCitations: [citation],
+      });
+      assert.deepEqual(
+        plan.occurrences.map((occurrence) => occurrence.displayText),
+        [first, second],
+        ellipsis,
+      );
+      assert.notInclude(plan.displayMarkdown, first, ellipsis);
+      assert.notInclude(plan.displayMarkdown, "Omitted source wording");
+      assert.include(plan.displayMarkdown, "Following discussion.");
+    }
+  });
+
+  it("binds a label-less blockquote to the minted citation that contains it", function () {
+    const passage =
+      "Neurons in CA1 flexibly reconfigure a shared pool of neurons to integrate distinct inputs. These subspaces persist across different mazes but express spatial context selectivity.";
+    const shown =
+      "These subspaces persist across different mazes but express spatial context selectivity.";
+    const citation = buildQuoteCitation({
+      quoteText: passage,
+      citationLabel: "(Lee, 2025)",
+      sourceMatchText: passage,
+      sourceMatchKind: "exact",
+      sourceMatchSource: "context-text",
+      contextItemId: 88,
+      itemId: 87,
+    })!;
+    const plan = buildQuoteRenderPlan({
+      markdown: `The paper says:\n\n> ${shown}\n\nThat matters.`,
+      quoteCitations: [citation],
+    });
+    assert.lengthOf(plan.occurrences, 1);
+    assert.equal(plan.occurrences[0].quoteCitationId, citation.id);
+    assert.equal(plan.occurrences[0].displayText, shown);
+    assert.equal(plan.occurrences[0].citationLabel, "(Lee, 2025)");
+    assert.equal(plan.occurrences[0].contextItemId, 88);
+    assert.notInclude(plan.displayMarkdown, shown);
+    assert.include(plan.displayMarkdown, "That matters.");
+  });
+
+  it("leaves the model's own blockquote plain when no citation contains it", function () {
+    const passage =
+      "Neurons in CA1 flexibly reconfigure a shared pool of neurons to integrate distinct inputs.";
+    const citation = buildQuoteCitation({
+      quoteText: passage,
+      citationLabel: "(Lee, 2025)",
+      sourceMatchText: passage,
+      sourceMatchKind: "exact",
+      sourceMatchSource: "context-text",
+      contextItemId: 88,
+      itemId: 87,
+    })!;
+    for (const own of [
+      "In short, the hippocampus reuses neurons for different inputs.",
+      "a shared pool",
+    ]) {
+      const plan = buildQuoteRenderPlan({
+        markdown: `> ${own}\n\nThat matters.`,
+        quoteCitations: [citation],
+      });
+      assert.isEmpty(plan.occurrences, own);
+      assert.include(plan.displayMarkdown, `> ${own}`, own);
+      assert.equal(plan.diagnostics[0]?.kind, "plain-blockquote", own);
+    }
+    const disabled = buildQuoteRenderPlan({
+      markdown: `> ${passage}`,
+      quoteCitations: [citation],
+      allowLegacyInference: false,
+    });
+    assert.isEmpty(disabled.occurrences);
   });
 });

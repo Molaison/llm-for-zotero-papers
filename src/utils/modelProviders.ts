@@ -80,6 +80,9 @@ export type StandardModelProviderGroup = {
   models: ModelProviderModel[];
   /** When "customized", UI shows Customized and allows editing URL; when undefined, preset is derived from apiBase. */
   presetIdOverride?: ProviderPresetId;
+  /** Explicit CPR route capabilities, retained in custom provider preferences. */
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
 };
 
 export type CodexDirectModelRow = {
@@ -128,6 +131,9 @@ type RuntimeModelEntryBase = {
   providerOrder: number;
   displayModelLabel: string;
   catalogAvailability?: "available" | "unverified" | "saved-unavailable";
+  /** Absent on upstream runtime-only entries; resolved as false. */
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
 };
 
 export type RuntimeModelEntry = RuntimeModelEntryBase &
@@ -230,10 +236,12 @@ function normalizeProviderAuthMode(value: unknown): ModelProviderAuthMode {
 function normalizeAdvancedModelConfig(
   value?: AdvancedModelConfigInput | null,
   runtimeMode?: unknown,
+  protocol?: ProviderProtocol,
 ): AdvancedModelConfig {
   const inputMode = normalizeModelInputModeForRuntime(
     value?.inputMode,
     runtimeMode,
+    protocol,
   );
   // Validated but NOT gated by forModel here: this normalization also feeds
   // the storage round-trip, and gating at this layer would silently drop a
@@ -344,6 +352,8 @@ type RawProviderGroup = {
   codexDirectModel?: unknown;
   selectedModel?: unknown;
   presetIdOverride?: unknown;
+  paperRegistry?: unknown;
+  directWebPdf?: unknown;
 };
 
 function normalizeCodexDirectModelRow(
@@ -484,6 +494,8 @@ function normalizeGroup(
     }),
     models,
     presetIdOverride: normalizeProviderPresetId(rawGroup.presetIdOverride),
+    ...(rawGroup.paperRegistry === true ? { paperRegistry: true } : {}),
+    ...(rawGroup.directWebPdf === true ? { directWebPdf: true } : {}),
   };
 }
 
@@ -878,8 +890,61 @@ function ensureModelProviderGroups(): ModelProviderGroup[] {
   return migrateLegacyModelProviderGroups();
 }
 
+/** Deep copy of plain JSON-shaped data (groups and runtime entries). */
+function clonePlainData<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((entry) => clonePlainData(entry)) as T;
+  }
+  if (value && typeof value === "object") {
+    const copy: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      copy[key] = clonePlainData(entry);
+    }
+    return copy as T;
+  }
+  return value;
+}
+
+// One click in a chat panel reads the provider groups 15-25 times. Parsing
+// and normalizing the stored JSON each time showed up in click latency, so
+// reads reuse the last result while the stored value and its migration
+// version are unchanged. Callers get their own copy and may mutate it.
+let cachedGroupsKey: string | null = null;
+let cachedGroups: ModelProviderGroup[] = [];
+
+function readModelProviderGroupsCacheKey(): string | null {
+  // Only a migrated, non-empty value is a pure function of the stored
+  // string; the legacy and pre-migration paths write prefs and stay uncached.
+  if (getMigrationVersion() < MODEL_PROVIDER_GROUPS_MIGRATION_VERSION) {
+    return null;
+  }
+  const raw = getStringPref(MODEL_PROVIDER_GROUPS_PREF_KEY);
+  return raw.trim() ? raw : null;
+}
+
+function readModelProviderGroupsShared(): {
+  key: string | null;
+  groups: ModelProviderGroup[];
+} {
+  const key = readModelProviderGroupsCacheKey();
+  if (key !== null && key === cachedGroupsKey) {
+    return { key, groups: cachedGroups };
+  }
+  const groups = ensureModelProviderGroups();
+  // Migration may have rewritten the stored value; key on what is stored now.
+  const storedKey = readModelProviderGroupsCacheKey();
+  if (storedKey !== null) {
+    cachedGroupsKey = storedKey;
+    cachedGroups = clonePlainData(groups);
+  } else {
+    cachedGroupsKey = null;
+    cachedGroups = [];
+  }
+  return { key: storedKey, groups };
+}
+
 export function getModelProviderGroups(): ModelProviderGroup[] {
-  return ensureModelProviderGroups();
+  return clonePlainData(readModelProviderGroupsShared().groups);
 }
 
 /** Consume the one-time notice emitted after resetting stored caps to Auto. */
@@ -893,8 +958,22 @@ export function consumeOutputTokenAutoMigrationNotice(): boolean {
   return pending;
 }
 
-export function setModelProviderGroups(groups: ModelProviderGroup[]): void {
+export function setModelProviderGroups(
+  groups: ModelProviderGroup[],
+  options: {
+    /**
+     * False saves now and leaves the notification to a later
+     * notifyModelProviderGroupsChanged() (settings text fields coalesce
+     * keystrokes this way).
+     */
+    notify?: boolean;
+  } = {},
+): void {
   storeModelProviderGroups(normalizeModelProviderGroups(groups));
+  if (options.notify !== false) notifyModelProviderGroupsChanged();
+}
+
+export function notifyModelProviderGroupsChanged(): void {
   for (const listener of modelProviderGroupListeners) listener();
 }
 
@@ -955,7 +1034,7 @@ export function createProviderModelEntry(
   return {
     id: createId("model"),
     model: model.trim(),
-    ...normalizeAdvancedModelConfig(advanced),
+    ...normalizeAdvancedModelConfig(advanced, "api_key", providerProtocol),
     ...(providerProtocol ? { providerProtocol } : {}),
   };
 }
@@ -970,8 +1049,34 @@ export function createWebChatTargetRow(
   return { id: createId("model"), model: model.trim() };
 }
 
+let cachedRuntimeEntriesGroupsKey: string | null = null;
+let cachedRuntimeEntriesCodexSnapshot: unknown = null;
+let cachedRuntimeEntries: RuntimeModelEntry[] = [];
+
 export function getRuntimeModelEntries(): RuntimeModelEntry[] {
-  const groups = getModelProviderGroups();
+  const { key, groups } = readModelProviderGroupsShared();
+  // Codex Direct rows read the live catalog snapshot, which is replaced (never
+  // mutated) when it changes, so its identity is part of the cache key.
+  const codexSnapshot = getCodexDirectCatalogSnapshot();
+  if (
+    key !== null &&
+    key === cachedRuntimeEntriesGroupsKey &&
+    codexSnapshot === cachedRuntimeEntriesCodexSnapshot
+  ) {
+    return clonePlainData(cachedRuntimeEntries);
+  }
+  const entries = buildRuntimeModelEntries(groups);
+  cachedRuntimeEntriesGroupsKey = key;
+  cachedRuntimeEntriesCodexSnapshot = codexSnapshot;
+  cachedRuntimeEntries = key !== null ? entries : [];
+  // Entries may share nested objects with the cached groups; never hand
+  // those out.
+  return clonePlainData(entries);
+}
+
+function buildRuntimeModelEntries(
+  groups: readonly ModelProviderGroup[],
+): RuntimeModelEntry[] {
   const entries: RuntimeModelEntry[] = [];
 
   for (const [groupIndex, group] of groups.entries()) {
@@ -999,6 +1104,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
           providerLabel: "Codex Direct (Legacy)",
           providerOrder: groupIndex,
           displayModelLabel: catalogModel?.displayName || modelName,
+          paperRegistry: false,
+          directWebPdf: false,
           advanced: normalizeAdvancedModelConfig(undefined, authMode),
           catalogAvailability:
             snapshot.status !== "ready"
@@ -1026,6 +1133,8 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
           providerLabel,
           providerOrder: groupIndex,
           displayModelLabel: `web/${modelName}`,
+          paperRegistry: false,
+          directWebPdf: false,
         });
       }
       continue;
@@ -1072,7 +1181,13 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
           duplicateCount > 1
             ? `${baseModelLabel} #${duplicateCount}`
             : baseModelLabel,
-        advanced: normalizeAdvancedModelConfig(modelEntry),
+        paperRegistry: group.paperRegistry === true,
+        directWebPdf: group.directWebPdf === true,
+        advanced: normalizeAdvancedModelConfig(
+          modelEntry,
+          group.authMode,
+          providerProtocol,
+        ),
       });
     }
 
@@ -1138,6 +1253,74 @@ export function getModelEntryById(
     getRuntimeModelEntries().find((entry) => entry.entryId === normalizedId) ||
     null
   );
+}
+
+export type ModelRouteCapabilities = {
+  paperRegistry: boolean;
+  directWebPdf: boolean;
+};
+
+export function getRuntimeModelCapabilities(
+  entry: RuntimeModelEntry | null | undefined,
+): ModelRouteCapabilities {
+  return {
+    paperRegistry: entry?.paperRegistry === true,
+    directWebPdf: entry?.directWebPdf === true,
+  };
+}
+
+/**
+ * Resolve the capabilities of the configured model row. This is a lookup of
+ * explicit provider-group configuration, not an inference from the model name
+ * or endpoint: an arbitrary alias on a capability-enabled route works, while a
+ * papers-shaped alias on a route without the bit does not.
+ */
+export function resolveConfiguredModelCapabilities(params: {
+  entryId?: string;
+  model?: string;
+  apiBase?: string;
+}): ModelRouteCapabilities {
+  let entries: RuntimeModelEntry[];
+  try {
+    entries = getRuntimeModelEntries();
+  } catch {
+    // Capability lookup is optional UI context. Outside a Zotero preference
+    // host (unit tests, early startup) fail closed instead of crashing the
+    // conversation, and never infer a route from the model name alone.
+    return { paperRegistry: false, directWebPdf: false };
+  }
+  const entryId = normalizeString(params.entryId);
+  if (entryId) {
+    const entry = entries.find((candidate) => candidate.entryId === entryId);
+    if (entry) return getRuntimeModelCapabilities(entry);
+  }
+
+  const model = normalizeString(params.model);
+  if (!model) return { paperRegistry: false, directWebPdf: false };
+  const apiBase = params.apiBase ? normalizeApiBase(params.apiBase) : "";
+  const matches = entries.filter(
+    (entry) =>
+      entry.model === model &&
+      (!apiBase || normalizeApiBase(entry.apiBase) === apiBase),
+  );
+  if (matches.length === 1) return getRuntimeModelCapabilities(matches[0]);
+
+  // Without an endpoint, only an unambiguous answer is safe. Two providers
+  // serving the same alias may expose different capabilities.
+  if (!apiBase && matches.length > 0) {
+    const first = matches[0];
+    const capabilities = getRuntimeModelCapabilities(first);
+    if (
+      matches.every(
+        (entry) =>
+          (entry.paperRegistry === true) === capabilities.paperRegistry &&
+          (entry.directWebPdf === true) === capabilities.directWebPdf,
+      )
+    ) {
+      return capabilities;
+    }
+  }
+  return { paperRegistry: false, directWebPdf: false };
 }
 
 export function getDefaultModelEntry(): RuntimeModelEntry | null {

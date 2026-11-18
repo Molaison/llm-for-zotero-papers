@@ -19,7 +19,9 @@ import {
   buildZoteroEnvironmentManifest,
   compactCodexAppServerConversation,
   compactCodexAppServerThread,
-  forkCodexAppServerThread,
+  buildForkedCodexThreadMcpConfig,
+  forkCodexAppServerThreadWithRecord,
+  forkedCodexThreadMcpWriteApproval,
   isDeniedTrustedZoteroMcpGuardianReviewForTests,
   registerNativeApprovalRequestHandlersForTests,
   registerNativeGuardianReviewHandlersForTests,
@@ -63,6 +65,12 @@ import {
   parseSkill,
   setUserSkills,
 } from "../src/agent/skills";
+
+import {
+  bumpConversationWriteGeneration,
+  freezeConversationWrites,
+  resetConversationWriteFenceForTests,
+} from "../src/shared/conversationWriteFence";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -389,6 +397,452 @@ describe("Codex app-server native client", function () {
       restorePrefs();
     }
     return { journal, mcpRows, items };
+  }
+
+  const ASK_STATE = {
+    boundary: { kind: "profile", profileId: ":workspace" },
+    approvalOverride: { policy: "on-request", reviewer: "user" },
+  } as const;
+  const FULL_STATE = {
+    boundary: { kind: "profile", profileId: ":danger-full-access" },
+    approvalOverride: { policy: "never", reviewer: "user" },
+  } as const;
+
+  /**
+   * One native turn with the Zotero tools on, under `permissionState`,
+   * optionally on a stored thread whose stored permission record is
+   * `storedRecord`. Returns the app-server requests and the stored record
+   * the turn wrote.
+   */
+  async function runMcpApprovalTurn(params: {
+    permissionState: unknown;
+    key: number;
+    storedThreadId?: string;
+    storedRecord?: string;
+    /** Have Codex ask to run library_update on this turn's server. */
+    elicit?: boolean;
+    /** The plugin's Zotero tools are off. */
+    toolsOff?: boolean;
+    /** An app-server without permission profiles (legacy Read only). */
+    legacy?: boolean;
+  }) {
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const originalZotero = (globalThis as never as { Zotero: any }).Zotero;
+    const registry = new AgentToolRegistry();
+    for (const name of ZOTERO_MCP_SAFE_READ_TOOL_NAMES) {
+      registry.register({
+        spec: {
+          name,
+          description: `Read fixture ${name}`,
+          inputSchema: { type: "object", additionalProperties: true },
+          executionClass: "read",
+          workCategory: "retrieval",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args ?? {} }),
+        execute: async () => ({ content: {} }),
+      } as never);
+    }
+    registry.register(createFileIOTool());
+    registry.register(createRunCommandTool());
+    (globalThis as never as { Zotero: any }).Zotero = {
+      ...originalZotero,
+      debug: () => undefined,
+      DataDirectory: { dir: "/tmp/lfz-native-mcp-approval-data" },
+      Profile: { dir: "/tmp/lfz-native-mcp-approval-profile" },
+      Server: { Endpoints: {} },
+      Libraries: { userLibraryID: 1 },
+      Items: { get: () => null },
+      Prefs: {
+        get: (key: string) => {
+          if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled"))
+            return !params.toolsOff;
+          if (key.endsWith("codexZoteroMcpBearerToken"))
+            return "approval-mode-bearer-0123456789abcdef";
+          if (key.endsWith(".codexNativeSkillMode")) return "off";
+          if (key.endsWith(".codexAppServerPermissionState"))
+            return params.legacy
+              ? undefined
+              : JSON.stringify(params.permissionState);
+          return undefined;
+        },
+        set: () => undefined,
+        prefHasUserValue: (key: string) =>
+          !params.legacy && key.endsWith(".codexAppServerPermissionState"),
+      },
+    };
+    registerMcpServer({
+      toolRegistry: registry,
+      zoteroGateway: {} as never,
+    });
+    const requests: Array<{ method: string; params: Record<string, any> }> = [];
+    const processKey = `native-mcp-approval-${params.key}`;
+    const serverName = getZoteroMcpServerName(getCodexProfileSignature());
+    const approvalRequests: Array<{ zoteroMcpServerName?: string }> = [];
+    const serverResponses: Array<Record<string, any>> = [];
+    let finishTurn: () => void = () => {};
+    const proc = createNativeLifecycleTestProcess({
+      newThreadIds: [`approval-thread-${params.key}`],
+      requests,
+      ...(params.elicit
+        ? {
+            onTurn: ({ threadId, turnId, emit }) => {
+              finishTurn = () =>
+                emit({
+                  method: "turn/completed",
+                  params: {
+                    threadId,
+                    turn: { id: turnId, status: "completed" },
+                  },
+                });
+              emit({
+                id: 9001,
+                method: "mcpServer/elicitation/request",
+                params: {
+                  threadId,
+                  turnId,
+                  serverName,
+                  mode: "form",
+                  _meta: {
+                    codex_approval_kind: "mcp_tool_call",
+                    tool_params: { kind: "tags" },
+                  },
+                  message: `Allow the ${serverName} MCP server to run tool "library_update"?`,
+                  requestedSchema: { type: "object", properties: {} },
+                },
+              });
+            },
+            onServerResponse: (message: Record<string, any>) => {
+              serverResponses.push(message);
+              finishTurn();
+            },
+          }
+        : {}),
+      permissionProfilesResult: params.legacy
+        ? undefined
+        : {
+            data: [
+              { id: ":workspace", description: "Workspace", allowed: true },
+              {
+                id: ":danger-full-access",
+                description: "Full access",
+                allowed: true,
+              },
+              { id: ":read-only", description: "Read only", allowed: true },
+            ],
+          },
+    });
+    CodexAppServerProcess.spawn = async () => proc;
+    const stored: Array<{ threadId: string; permissionState?: string }> = [];
+    try {
+      await runCodexAppServerNativeTurn({
+        scope: { conversationKey: params.key, libraryID: 1, kind: "global" },
+        model: "gpt-5.6",
+        messages: [{ role: "user", content: "Tag the paper." }],
+        processKey,
+        onApprovalRequest: async (request: {
+          zoteroMcpServerName?: string;
+        }) => {
+          approvalRequests.push(request);
+          return { action: "accept", content: null, _meta: null };
+        },
+        hooks: {
+          loadProviderSessionId: async () => params.storedThreadId ?? null,
+          loadProviderPermissionState: async () => params.storedRecord,
+          persistProviderSession: async (entry: {
+            threadId: string;
+            permissionState?: string;
+          }) => {
+            stored.push(entry);
+          },
+          clearProviderSessionId: async () => {},
+        },
+      } as never);
+    } finally {
+      unregisterMcpServer();
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc);
+      (globalThis as never as { Zotero: any }).Zotero = originalZotero;
+    }
+    return { requests, serverName, stored, approvalRequests, serverResponses };
+  }
+
+  it("stores auto for a thread created with the Zotero tools off", async function () {
+    this.timeout(15000);
+    const { requests, stored } = await runMcpApprovalTurn({
+      permissionState: ASK_STATE,
+      key: 6_000_000_339,
+      toolsOff: true,
+    });
+    assert.include(
+      requests.map((request) => request.method),
+      "thread/start",
+    );
+    // No plugin Zotero server was bound, although Ask implies "writes".
+    assert.equal(
+      JSON.parse(stored.at(-1)?.permissionState || "{}").mcpWriteApproval,
+      "auto",
+    );
+  });
+
+  it("keeps the stored mode when a tools-off turn resumes a writes thread", async function () {
+    this.timeout(15000);
+    const key = 6_000_000_343;
+    const { requests, stored } = await runMcpApprovalTurn({
+      permissionState: ASK_STATE,
+      key,
+      toolsOff: true,
+      storedThreadId: `stored-thread-${key}`,
+      storedRecord: JSON.stringify({
+        ...ASK_STATE,
+        mcpWriteApproval: "writes",
+      }),
+    });
+    const methods = requests.map((request) => request.method);
+    assert.include(methods, "thread/resume", JSON.stringify(methods));
+    assert.notInclude(methods, "thread/start");
+    // The thread was created bound to the Zotero server under "writes";
+    // turning the tools off for one turn must not rewrite that to "auto".
+    assert.isAbove(stored.length, 0);
+    assert.equal(
+      JSON.parse(stored.at(-1)?.permissionState || "{}").mcpWriteApproval,
+      "writes",
+    );
+  });
+
+  for (const [label, storedRecord, replaced, key] of [
+    [
+      "a legacy thread from before the mode was stored",
+      undefined,
+      true,
+      6_000_000_341,
+    ],
+    [
+      "a legacy thread that stored its mode",
+      JSON.stringify({ mcpWriteApproval: "writes" }),
+      false,
+      6_000_000_342,
+    ],
+  ] as const) {
+    it(`${replaced ? "replaces" : "resumes"} ${label}, and stores a mode that keeps it resumed`, async function () {
+      this.timeout(15000);
+      const { requests, stored } = await runMcpApprovalTurn({
+        permissionState: null,
+        key,
+        legacy: true,
+        storedThreadId: `legacy-thread-${key}`,
+        storedRecord,
+      });
+      const methods = requests.map((request) => request.method);
+      // The legacy protocol: a read-only sandbox, no permission profile.
+      const threadRequest = requests.find((request) =>
+        ["thread/start", "thread/resume"].includes(request.method),
+      );
+      assert.equal(threadRequest?.params.sandbox, "read-only");
+      if (replaced) {
+        assert.include(methods, "thread/start", JSON.stringify(methods));
+        assert.notInclude(methods, "thread/resume");
+        // The replacement stores "writes", so the next turn resumes it.
+        assert.deepEqual(JSON.parse(stored.at(-1)?.permissionState || "{}"), {
+          mcpWriteApproval: "writes",
+        });
+      } else {
+        assert.include(methods, "thread/resume", JSON.stringify(methods));
+        assert.notInclude(methods, "thread/start");
+      }
+    });
+  }
+
+  it("hands a Zotero write approval to the host with this turn's server name", async function () {
+    this.timeout(15000);
+    const { serverName, approvalRequests, serverResponses } =
+      await runMcpApprovalTurn({
+        permissionState: ASK_STATE,
+        key: 6_000_000_338,
+        elicit: true,
+      });
+    assert.lengthOf(approvalRequests, 1);
+    assert.equal(approvalRequests[0].zoteroMcpServerName, serverName);
+    assert.deepEqual(serverResponses.at(-1)?.result, {
+      action: "accept",
+      content: null,
+      _meta: null,
+    });
+  });
+
+  for (const [chip, permissionState, expected, key] of [
+    ["Ask for approval", ASK_STATE, "writes", 6_000_000_330],
+    ["Full access", FULL_STATE, "auto", 6_000_000_331],
+    [
+      "read only",
+      {
+        boundary: { kind: "profile", profileId: ":read-only" },
+        approvalOverride: { policy: "never", reviewer: "user" },
+      },
+      "writes",
+      6_000_000_332,
+    ],
+  ] as const) {
+    it(`starts the thread with Zotero writes set to ${expected} under ${chip}`, async function () {
+      this.timeout(15000);
+      const { requests, serverName, stored } = await runMcpApprovalTurn({
+        permissionState,
+        key,
+      });
+      const start = requests.find(
+        (request) => request.method === "thread/start",
+      );
+      assert.exists(start, JSON.stringify(requests.map((r) => r.method)));
+      const servers = start!.params.config?.mcp_servers as Record<string, any>;
+      const server = servers[serverName];
+      assert.exists(server, JSON.stringify(Object.keys(servers || {})));
+      assert.equal(server.default_tools_approval_mode, expected);
+      assert.equal(server.tools.library_update.approval_mode, expected);
+      assert.equal(servers.llm_for_zotero?.enabled, false);
+      assert.equal(server.tools.library_search.approval_mode, "approve");
+      // The new thread's stored record names the mode it was created with.
+      assert.equal(
+        JSON.parse(stored.at(-1)?.permissionState || "{}").mcpWriteApproval,
+        expected,
+      );
+    });
+  }
+
+  /**
+   * thread/resume keeps the approval mode a thread was created with (Codex
+   * 0.164, captured 2026-10-31), so a stored thread created under another
+   * mode is replaced; one created under this turn's mode is resumed.
+   */
+  for (const [label, permissionState, storedRecord, replaced, key] of [
+    // A conversation from before the mode was stored: created under "auto".
+    [
+      "a pre-upgrade thread under Ask",
+      ASK_STATE,
+      JSON.stringify(ASK_STATE),
+      true,
+      6_000_000_333,
+    ],
+    [
+      "an Approve-for-me thread after switching to Ask",
+      ASK_STATE,
+      JSON.stringify({
+        boundary: { kind: "profile", profileId: ":workspace" },
+        approvalOverride: { policy: "on-request", reviewer: "auto_review" },
+        mcpWriteApproval: "auto",
+      }),
+      true,
+      6_000_000_334,
+    ],
+    [
+      "an Ask thread after switching to Full access",
+      FULL_STATE,
+      JSON.stringify({ ...ASK_STATE, mcpWriteApproval: "writes" }),
+      true,
+      6_000_000_335,
+    ],
+    [
+      "an Ask thread under Ask",
+      ASK_STATE,
+      JSON.stringify({ ...ASK_STATE, mcpWriteApproval: "writes" }),
+      false,
+      6_000_000_336,
+    ],
+    [
+      "a pre-upgrade thread under Full access",
+      FULL_STATE,
+      JSON.stringify(FULL_STATE),
+      false,
+      6_000_000_337,
+    ],
+  ] as const) {
+    it(`${replaced ? "replaces" : "resumes"} ${label}`, async function () {
+      this.timeout(15000);
+      const { requests, stored } = await runMcpApprovalTurn({
+        permissionState,
+        key,
+        storedThreadId: `stored-thread-${key}`,
+        storedRecord,
+      });
+      const methods = requests.map((request) => request.method);
+      if (replaced) {
+        assert.include(methods, "thread/start", JSON.stringify(methods));
+        assert.notInclude(methods, "thread/resume");
+        const record = JSON.parse(stored.at(-1)?.permissionState || "{}");
+        assert.equal(record.mcpWriteApproval, codexModeOf(permissionState));
+        assert.equal(stored.at(-1)?.threadId, `approval-thread-${key}`);
+      } else {
+        assert.include(methods, "thread/resume", JSON.stringify(methods));
+        assert.notInclude(methods, "thread/start");
+      }
+    });
+  }
+
+  for (const [label, saved, expected] of [
+    ["Ask for approval", JSON.stringify(ASK_STATE), "writes"],
+    ["Full access", JSON.stringify(FULL_STATE), "auto"],
+    [
+      "Approve for me",
+      JSON.stringify({
+        boundary: { kind: "profile", profileId: ":workspace" },
+        approvalOverride: { policy: "on-request", reviewer: "auto_review" },
+      }),
+      "auto",
+    ],
+    [
+      "read only after Full access",
+      JSON.stringify({
+        boundary: { kind: "profile", profileId: ":read-only" },
+        approvalOverride: { policy: "never", reviewer: "user" },
+      }),
+      "writes",
+    ],
+    // An unreadable saved chip asks.
+    ["an unreadable saved chip", "{not json", "writes"],
+  ] as const) {
+    it(`forks with Zotero writes set to ${expected} under ${label}, and stores that mode`, function () {
+      const originalZotero = (globalThis as never as { Zotero: any }).Zotero;
+      (globalThis as never as { Zotero: any }).Zotero = {
+        ...originalZotero,
+        debug: () => undefined,
+        Profile: { dir: "/tmp/lfz-fork-approval-profile" },
+        DataDirectory: { dir: "/tmp/lfz-fork-approval-data" },
+        Prefs: {
+          get: (key: string) => {
+            if (key.endsWith(".codexAppServerZoteroMcpToolsEnabled"))
+              return true;
+            if (key.endsWith("codexZoteroMcpBearerToken"))
+              return "fork-approval-bearer-0123456789abcdef";
+            if (key.endsWith(".codexAppServerPermissionState")) return saved;
+            return undefined;
+          },
+          set: () => undefined,
+          prefHasUserValue: (key: string) =>
+            key.endsWith(".codexAppServerPermissionState"),
+        },
+      };
+      try {
+        const serverName = getZoteroMcpServerName(getCodexProfileSignature());
+        const config = buildForkedCodexThreadMcpConfig(
+          6_000_000_340,
+          undefined,
+          forkedCodexThreadMcpWriteApproval(),
+        );
+        const servers = config?.mcp_servers as Record<string, any>;
+        assert.equal(servers[serverName].default_tools_approval_mode, expected);
+        assert.equal(
+          servers[serverName].tools.note_write.approval_mode,
+          expected,
+        );
+        assert.equal(servers.llm_for_zotero.enabled, false);
+        assert.equal(forkedCodexThreadMcpWriteApproval(), expected);
+      } finally {
+        (globalThis as never as { Zotero: any }).Zotero = originalZotero;
+      }
+    });
+  }
+
+  function codexModeOf(state: unknown): string {
+    return state === FULL_STATE ? "auto" : "writes";
   }
 
   for (const order of ["mcp_first", "item_first"] as const) {
@@ -1323,6 +1777,9 @@ describe("Codex app-server native client", function () {
       JSON.stringify({
         boundary: { kind: "profile", profileId: ":workspace" },
         approvalOverride: { policy: "on-request", reviewer: "user" },
+        // The resumed thread keeps the mode it was stored with: none, so
+        // "auto", the only mode before.
+        mcpWriteApproval: "auto",
       }),
     );
   });
@@ -1410,6 +1867,157 @@ describe("Codex app-server native client", function () {
           request.params.threadId === "thread-settings-old",
       ),
     );
+  });
+
+  describe("stale conversation write during thread resume", function () {
+    const staleScope = (conversationKey: number) => ({
+      conversationKey,
+      libraryID: 1,
+      kind: "global" as const,
+      title: "Stale write during resume",
+    });
+    const archivedThreadIds = (
+      requests: Array<{ method: string; params: Record<string, any> }>,
+    ) =>
+      requests
+        .filter((request) => request.method === "thread/archive")
+        .map((request) => request.params.threadId);
+
+    async function runStaleResume(options: {
+      conversationKey: number;
+      processKey: string;
+      onResume?: (threadId: string) => string | void;
+      resumeError?: string;
+    }) {
+      const requests: Array<{
+        method: string;
+        params: Record<string, any>;
+      }> = [];
+      const proc = createNativeLifecycleTestProcess({
+        newThreadIds: ["thread-must-not-start"],
+        requests,
+        permissionProfilesResult: {
+          data: [{ id: ":workspace", description: "Workspace", allowed: true }],
+        },
+        resumeEffectiveSettings: {
+          permissions: ":workspace",
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+        },
+        onResume: options.onResume,
+        resumeError: options.resumeError,
+      });
+      const originalSpawn = CodexAppServerProcess.spawn;
+      const restorePrefs = installDirectPathTestPrefs("off", ":workspace");
+      CodexAppServerProcess.spawn = async () => proc;
+      let rejection: unknown;
+      let persistedThreadId = "";
+      try {
+        await runCodexAppServerNativeTurn({
+          scope: staleScope(options.conversationKey),
+          model: "gpt-5.6",
+          messages: [{ role: "user", content: "Continue." }],
+          processKey: options.processKey,
+          hooks: {
+            loadProviderSessionId: async () => "thread-stored",
+            loadProviderPermissionState: async () =>
+              JSON.stringify({
+                boundary: { kind: "profile", profileId: ":workspace" },
+                approvalOverride: { policy: "on-request", reviewer: "user" },
+              }),
+            persistProviderSession: async (value) => {
+              persistedThreadId = value.threadId;
+            },
+          },
+        });
+      } catch (error) {
+        rejection = error;
+      } finally {
+        CodexAppServerProcess.spawn = originalSpawn;
+        destroyCachedCodexAppServerProcess(options.processKey, proc);
+        restorePrefs();
+        resetConversationWriteFenceForTests();
+      }
+      return { requests, rejection, persistedThreadId };
+    }
+
+    beforeEach(function () {
+      resetConversationWriteFenceForTests();
+    });
+
+    it("rejects without archiving the stored thread or starting a new one when the generation changes during resume", async function () {
+      const key = 6_000_000_503;
+      const { requests, rejection } = await runStaleResume({
+        conversationKey: key,
+        processKey: "native-stale-write-same-thread",
+        onResume: () => {
+          bumpConversationWriteGeneration(key);
+        },
+      });
+      assert.match(
+        String((rejection as Error)?.message || rejection),
+        /Conversation write generation changed/,
+      );
+      assert.notInclude(archivedThreadIds(requests), "thread-stored");
+      assert.isEmpty(archivedThreadIds(requests));
+      assert.isFalse(
+        requests.some((request) => request.method === "thread/start"),
+      );
+    });
+
+    it("cleans up only the replacement thread when the generation changes during a resume that returns a different thread", async function () {
+      const key = 6_000_000_504;
+      const { requests, rejection, persistedThreadId } = await runStaleResume({
+        conversationKey: key,
+        processKey: "native-stale-write-replacement-thread",
+        onResume: () => {
+          bumpConversationWriteGeneration(key);
+          return "thread-replacement";
+        },
+      });
+      assert.match(
+        String((rejection as Error)?.message || rejection),
+        /Conversation write generation changed/,
+      );
+      assert.deepEqual(archivedThreadIds(requests), ["thread-replacement"]);
+      assert.isFalse(
+        requests.some((request) => request.method === "thread/start"),
+      );
+      assert.notEqual(persistedThreadId, "thread-replacement");
+    });
+
+    it("rejects without archiving the stored thread when writes are frozen during resume", async function () {
+      const key = 6_000_000_505;
+      const { requests, rejection } = await runStaleResume({
+        conversationKey: key,
+        processKey: "native-stale-write-frozen",
+        onResume: () => {
+          freezeConversationWrites(key);
+        },
+      });
+      assert.match(
+        String((rejection as Error)?.message || rejection),
+        /Conversation write generation changed/,
+      );
+      assert.isEmpty(archivedThreadIds(requests));
+      assert.isFalse(
+        requests.some((request) => request.method === "thread/start"),
+      );
+    });
+
+    it("still archives the stored thread and starts a new one when resume genuinely fails", async function () {
+      const { requests, rejection, persistedThreadId } = await runStaleResume({
+        conversationKey: 6_000_000_506,
+        processKey: "native-stale-write-genuine-resume-failure",
+        resumeError: "thread resume failed upstream",
+      });
+      assert.isUndefined(rejection);
+      assert.include(archivedThreadIds(requests), "thread-stored");
+      assert.isTrue(
+        requests.some((request) => request.method === "thread/start"),
+      );
+      assert.equal(persistedThreadId, "thread-must-not-start");
+    });
   });
 
   it("replaces a sticky Ask thread before Custom, injects history, then swaps durably", async function () {
@@ -1525,7 +2133,11 @@ describe("Codex app-server native client", function () {
     assert.equal(persistedThreadId, "thread-custom-replacement");
     assert.equal(
       persistedPermissionState,
-      JSON.stringify({ boundary: { kind: "config" }, approvalOverride: null }),
+      JSON.stringify({
+        boundary: { kind: "config" },
+        approvalOverride: null,
+        mcpWriteApproval: "auto",
+      }),
     );
     assert.isTrue(
       requests.some(
@@ -1672,6 +2284,31 @@ describe("Codex app-server native client", function () {
     });
   });
 
+  it("does not kill the shared process when model/list times out", async function () {
+    const processKey = "native-model-list-timeout-test";
+    const originalSpawn = CodexAppServerProcess.spawn;
+    const proc = CodexAppServerProcess.forTest({
+      stdin: { write: () => {} },
+      kill: () => {},
+    });
+    const calls: unknown[][] = [];
+    (proc as any).sendRequest = async (...args: unknown[]) => {
+      calls.push(args);
+      return { data: [] };
+    };
+    CodexAppServerProcess.spawn = async () => proc;
+    try {
+      await listCodexAppServerModels({ processKey, codexPath: "codex" });
+    } finally {
+      CodexAppServerProcess.spawn = originalSpawn;
+      destroyCachedCodexAppServerProcess(processKey, proc, {
+        codexPath: "codex",
+      });
+    }
+    assert.equal(calls[0][0], "model/list");
+    assert.deepEqual(calls[0][3], { failProcessOnTimeout: false });
+  });
+
   it("forks a thread with the target conversation's scope header, not the source's", async function () {
     const processKey = "native-fork-scope-header";
     const originalSpawn = CodexAppServerProcess.spawn;
@@ -1693,7 +2330,9 @@ describe("Codex app-server native client", function () {
               string,
               { http_headers?: Record<string, string> }
             >;
-            const serverConfig = Object.values(servers || {})[0];
+            const serverConfig = Object.entries(servers || {}).find(
+              ([name]) => name !== "llm_for_zotero",
+            )?.[1];
             const response = await invokeRegisteredZoteroMcpEndpoint({
               method: "POST",
               data: {
@@ -1739,13 +2378,18 @@ describe("Codex app-server native client", function () {
     });
 
     try {
-      const threadId = await forkCodexAppServerThread({
+      const forked = await forkCodexAppServerThreadWithRecord({
         threadId: "thread-source",
         targetConversationKey: 6_000_000_311,
         processKey,
         codexPath: "codex",
       });
-      assert.equal(threadId, "thread-forked");
+      assert.equal(forked.threadId, "thread-forked");
+      // The fork binds the saved chip's mode (Ask by default) and its
+      // conversation stores that mode.
+      assert.deepEqual(JSON.parse(forked.providerPermissionRecord), {
+        mcpWriteApproval: "writes",
+      });
 
       const forkRequest = writes
         .map(
@@ -1762,7 +2406,9 @@ describe("Codex app-server native client", function () {
         string,
         { http_headers?: Record<string, string> }
       >;
-      const serverConfig = Object.values(servers || {})[0];
+      const serverConfig = Object.entries(servers || {}).find(
+        ([name]) => name !== "llm_for_zotero",
+      )?.[1];
       const sentScopeToken =
         serverConfig?.http_headers?.[ZOTERO_MCP_SCOPE_HEADER];
       const profileSignature = getCodexProfileSignature();
@@ -1831,13 +2477,17 @@ describe("Codex app-server native client", function () {
     };
 
     try {
-      const threadId = await forkCodexAppServerThread({
+      const forked = await forkCodexAppServerThreadWithRecord({
         threadId: "thread-source",
         targetConversationKey: 6_000_000_313,
         processKey,
         codexPath: "codex",
       });
-      assert.equal(threadId, "thread-forked-disabled");
+      assert.equal(forked.threadId, "thread-forked-disabled");
+      // With the Zotero tools off no plugin server is bound: "auto".
+      assert.deepEqual(JSON.parse(forked.providerPermissionRecord), {
+        mcpWriteApproval: "auto",
+      });
 
       const forkRequest = writes
         .map(
@@ -1856,7 +2506,9 @@ describe("Codex app-server native client", function () {
           http_headers?: Record<string, string>;
         }
       >;
-      const serverConfig = Object.values(servers || {})[0];
+      const serverConfig = Object.entries(servers || {}).find(
+        ([name]) => name !== "llm_for_zotero",
+      )?.[1];
       assert.equal(serverConfig?.enabled, false);
       assert.notProperty(serverConfig || {}, "required");
       assert.equal(
@@ -2226,7 +2878,7 @@ describe("Codex app-server native client", function () {
     assert.equal(manifest.split(PAPER_CITATION_CONTRACT).length - 1, 1);
     assert.include(
       manifest,
-      "cite supporting passages at paragraph ends with [[cite:Q_x7a2]]",
+      "cite supporting passages at sentence ends, before the period",
     );
     assert.include(
       manifest,
@@ -2858,6 +3510,11 @@ describe("Codex app-server native client", function () {
 
     assert.equal(threadStartParams?.approvalPolicy, "on-request");
     assert.equal(threadStartParams?.approvalsReviewer, "auto_review");
+    // The Zotero tools are off, so the user-level Zotero server is off too.
+    assert.equal(
+      (threadStartParams?.config as any)?.mcp_servers?.llm_for_zotero?.enabled,
+      false,
+    );
     assert.notProperty(turnStartParams || {}, "approvalPolicy");
     assert.notProperty(turnStartParams || {}, "approvalsReviewer");
   });

@@ -164,6 +164,48 @@ describe("context_read", function () {
     assert.match(String(output.error), /No stored tool results/);
   });
 
+  it("reports missing top-level paths as content failures without enabling dot paths or advancing a page", async function () {
+    const papers = [
+      { itemId: 1, digests: [{ digest: "First paper summary." }] },
+      { itemId: 2, digests: [{ digest: "Second paper summary." }] },
+    ];
+    const record = createAgentToolResultHandleRecord({
+      conversationKey: 10,
+      toolName: "paper_read",
+      toolCallId: "call-full-read",
+      content: { mode: "full", papers },
+    });
+    await upsertAgentToolResultHandles([record!]);
+    const args = { source: "tool_result", handle: record!.handle };
+    const toolContext = context(10, { agentToolResultReadAvailable: true });
+
+    const metadata = await run(args, toolContext);
+    assert.isTrue(metadata.ok);
+    assert.notProperty(metadata, "error");
+    assert.deepEqual(metadata.availablePaths, ["mode", "papers"]);
+    assert.equal(metadata.papersCount, 2);
+
+    for (const path of ["papers.0.digests", "missing"]) {
+      const rejected = await run({ ...args, path }, toolContext);
+      assert.isFalse(rejected.ok, path);
+      assert.equal(rejected.handle, record!.handle);
+      assert.equal(rejected.path, path);
+      assert.include(String(rejected.error), `no top-level path '${path}'`);
+      assert.deepEqual(rejected.availablePaths, ["mode", "papers"]);
+      for (const key of ["items", "value", "nextOffset", "nextTextOffset"])
+        assert.notProperty(rejected, key);
+    }
+
+    const page = await run(
+      { ...args, path: "papers", offset: 0, limit: 1 },
+      toolContext,
+    );
+    assert.isTrue(page.ok);
+    assert.notProperty(page, "error");
+    assert.deepEqual(page.items, [papers[0]]);
+    assert.equal(page.nextOffset, 1);
+  });
+
   it("routes source:'conversation' without messageId to the message list", async function () {
     const messages: AgentModelMessage[] = [
       { role: "user", content: "First question", messageId: "user-0" },

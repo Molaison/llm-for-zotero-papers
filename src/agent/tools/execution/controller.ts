@@ -1,4 +1,7 @@
-import { recordJournalObservation } from "../../store/changeJournal";
+import {
+  inJournalTransaction,
+  recordJournalObservation,
+} from "../../store/changeJournal";
 import { appLogger } from "../../../core/logging";
 import { ToolExecutionFailure, ToolInputRejection } from "./failure";
 import { buildActionCallDigest } from "../../authorization/proposal";
@@ -264,12 +267,21 @@ export class InvocationController {
         ? { interaction: "user_input" as const }
         : {}),
     };
+    // One displayed proposal has one execution, including while reassessment
+    // or the native write is awaiting. Re-entering this callback must not
+    // stage a second grant or repeat a non-idempotent tool.
+    let execution: Promise<PreparedToolExecution> | undefined;
     return {
       kind: "confirmation",
       requestId: createRequestId(),
       action,
       execute: (resolution) =>
-        this.resolveReview(assessed, action, resolution, applyToolResolution),
+        (execution ??= this.resolveReview(
+          assessed,
+          action,
+          resolution,
+          applyToolResolution,
+        )),
       deny: () =>
         this.failure(assessed.input, "User denied action", assessed, true),
     };
@@ -385,17 +397,22 @@ export class InvocationController {
         status: "staged" as "staged" | "executed" | "failed",
         createdAt: Date.now(),
       };
-      await recordJournalObservation({
-        event: "external_authorization_prepared",
-        objectType: "tool_invocation",
-        objectIds: [this.context.runId!, this.call.id],
-        extra: {
-          grant,
-          libraryID: this.context.request.libraryID,
-          proposal: assessed.proposal,
-          input: this.call.arguments,
-        },
-      });
+      // Its own transaction, so another flow's rollback cannot drop the
+      // grant. Tool invocations start from the agent loop, MCP, an action
+      // page or undo, never inside a Zotero transaction.
+      await inJournalTransaction(() =>
+        recordJournalObservation({
+          event: "external_authorization_prepared",
+          objectType: "tool_invocation",
+          objectIds: [this.context.runId!, this.call.id],
+          extra: {
+            grant,
+            libraryID: this.context.request.libraryID,
+            proposal: assessed.proposal,
+            input: this.call.arguments,
+          },
+        }),
+      );
       return grant;
     }
     if (
@@ -418,17 +435,19 @@ export class InvocationController {
       status: "staged" as "staged" | "executed" | "failed",
       createdAt: Date.now(),
     };
-    await recordJournalObservation({
-      actionId: this.context.journalActionScope?.actionId,
-      event: "original_authorization_prepared",
-      objectType: "tool_invocation",
-      objectIds: [this.context.runId!, this.call.id],
-      extra: {
-        grant,
-        libraryID: this.context.request.executionContext?.chatLibraryID,
-        proposal: assessed.proposal,
-      },
-    });
+    await inJournalTransaction(() =>
+      recordJournalObservation({
+        actionId: this.context.journalActionScope?.actionId,
+        event: "original_authorization_prepared",
+        objectType: "tool_invocation",
+        objectIds: [this.context.runId!, this.call.id],
+        extra: {
+          grant,
+          libraryID: this.context.request.executionContext?.chatLibraryID,
+          proposal: assessed.proposal,
+        },
+      }),
+    );
     return grant;
   }
 
@@ -437,21 +456,24 @@ export class InvocationController {
     status: "executed" | "failed",
     extra: Record<string, unknown>,
   ): Promise<void> {
-    if (!grant || !this.context.runId) return;
+    const runId = this.context.runId;
+    if (!grant || !runId) return;
     const external = grant.authority === "external_runtime";
-    await recordJournalObservation({
-      actionId: this.context.journalActionScope?.actionId,
-      event: external
-        ? status === "executed"
-          ? "external_execution_completed"
-          : "external_execution_failed"
-        : status === "executed"
-          ? "original_execution_completed"
-          : "original_execution_failed",
-      objectType: "tool_invocation",
-      objectIds: [this.context.runId, this.call.id],
-      extra: { authority: grant.authority, ...extra },
-    }).catch((error) => {
+    await inJournalTransaction(() =>
+      recordJournalObservation({
+        actionId: this.context.journalActionScope?.actionId,
+        event: external
+          ? status === "executed"
+            ? "external_execution_completed"
+            : "external_execution_failed"
+          : status === "executed"
+            ? "original_execution_completed"
+            : "original_execution_failed",
+        objectType: "tool_invocation",
+        objectIds: [runId, this.call.id],
+        extra: { authority: grant.authority, ...extra },
+      }),
+    ).catch((error) => {
       // Mutation receipts remain authoritative. A supplementary audit failure
       // must not invite replay of an action whose native outcome is already known.
       appLogger.warn(
@@ -600,6 +622,7 @@ export class InvocationController {
             materialKind: output.materialKind,
             materialTitle: output.materialTitle,
             materialCitedSources: output.materialCitedSources,
+            paperDecisions: output.paperDecisions,
             batchItems: output.batchItems,
           },
         });

@@ -74,6 +74,13 @@ import type {
 
 const REGISTRY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const PROVIDER_CATALOG_TTL_MS = 60 * 1000;
+// A failed fetch marks its snapshot stale, and stale snapshots bypass the TTL.
+// Without a retry floor every caller (each model-menu rebuild, each notify)
+// starts another request to an unreachable server.
+const FAILED_REFRESH_RETRY_MS = 60 * 1000;
+// A user may start a local server right after a failed catalog fetch, so
+// the catalog retries sooner than the registry.
+const FAILED_CATALOG_RETRY_MS = 10 * 1000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 10_000;
 const FIRST_USE_PREFLIGHT_TIMEOUT_MS = 5_000;
 
@@ -97,12 +104,15 @@ let activeRegistry = cloneRegistry(BUNDLED_MODEL_CAPABILITY_REGISTRY);
 let activeRegistrySource: CapabilitySource = "bundled";
 let registryLoadTask: Promise<void> | null = null;
 let registryFetchedAt = 0;
+/** Last registry fetch that failed to reach the server (0: none). */
+let registryFailedAt = 0;
 let registryRefreshTask: Promise<boolean> | null = null;
 const capabilityPreflightTasks = new Map<string, Promise<void>>();
 const catalogRefreshTasks = new Map<string, Promise<DiscoveredModel[]>>();
 const catalogFetchGenerations = new Map<string, number>();
 let nextCatalogFetchGeneration = 0;
 const catalogSnapshots = new Map<string, CatalogSnapshot>();
+const catalogAttemptedAt = new Map<string, number>();
 const capabilityListeners = new Set<() => void>();
 
 function now(): number {
@@ -329,18 +339,48 @@ function isSameCatalogConfiguration(
   );
 }
 
+/** Stores the snapshot; true when what readers can see changed. */
 function setCatalogSnapshot(
   key: string,
   identity: ModelCatalogIdentity,
   snapshot: CatalogSnapshot,
-): void {
+): boolean {
+  let changed = false;
   for (const existingKey of Array.from(catalogSnapshots.keys())) {
     if (existingKey === key) continue;
     if (isSameCatalogConfiguration(existingKey, identity)) {
       catalogSnapshots.delete(existingKey);
+      changed = true;
     }
   }
+  const previous = catalogSnapshots.get(key);
   catalogSnapshots.set(key, snapshot);
+  return changed || !isSameCatalogContent(previous, snapshot);
+}
+
+// fetchedAt alone is not a material change: listeners rebuild open menus and
+// settings editors, and a refetch that returns the same list (or fails the
+// same way again) must not make them repaint.
+function isSameCatalogContent(
+  previous: CatalogSnapshot | undefined,
+  next: CatalogSnapshot,
+): boolean {
+  if (!previous) return false;
+  return (
+    previous.stale === next.stale &&
+    previous.error === next.error &&
+    previous.errorCode === next.errorCode &&
+    JSON.stringify(previous.models) === JSON.stringify(next.models)
+  );
+}
+
+/** setCatalogSnapshot, then notify listeners only on a material change. */
+function publishCatalogSnapshot(
+  key: string,
+  identity: ModelCatalogIdentity,
+  snapshot: CatalogSnapshot,
+): void {
+  if (setCatalogSnapshot(key, identity, snapshot)) notify();
 }
 
 function getCatalogSnapshot(
@@ -420,6 +460,7 @@ function getLiveModel(
 function mergeLimits(
   entry: RegistryModelEntry | null,
   live: DiscoveredModel | undefined,
+  requestModelLimits?: ModelCapabilityLimits,
 ): { limits: ModelCapabilityLimits; source?: CapabilitySource } {
   const entryLimits = entry?.limits;
   const liveLimits = live?.limits;
@@ -432,11 +473,19 @@ function mergeLimits(
     // rules when the provider does not expose a separate input limit.
     limits.inputTokens = liveLimits.contextWindowTokens;
   }
-  const source: CapabilitySource | undefined = liveLimits
-    ? "live"
-    : entryLimits
-      ? activeRegistrySource
-      : undefined;
+  Object.assign(limits, requestModelLimits);
+  if (
+    requestModelLimits?.contextWindowTokens &&
+    requestModelLimits.inputTokens === undefined
+  ) {
+    limits.inputTokens = requestModelLimits.contextWindowTokens;
+  }
+  const source: CapabilitySource | undefined =
+    requestModelLimits || liveLimits
+      ? "live"
+      : entryLimits
+        ? activeRegistrySource
+        : undefined;
   return { limits, source };
 }
 
@@ -615,6 +664,7 @@ export async function ensureModelCapabilities(
   if (!task) {
     task = (async () => {
       await initializeModelCapabilityRegistry();
+      if (capabilityPreflightTasks.get(key) !== task) return;
       const registryProbe = !findRegistryEntry(
         activeRegistry,
         providerFromIdentity(identity),
@@ -661,7 +711,7 @@ export function getModelCapabilities(
   const model = identity.model.trim();
   const entry = findRegistryEntry(activeRegistry, provider, model);
   const live = getLiveModel(identity);
-  const mergedLimits = mergeLimits(entry, live);
+  const mergedLimits = mergeLimits(entry, live, identity.requestModelLimits);
   const mergedReasoning = mergeReasoning(
     provider,
     model,
@@ -792,7 +842,10 @@ export function compileReasoningControls(
   const extra = sanitizeUserRequestBody(patched) || {};
   return {
     extra,
-    omitTemperature: Boolean(controls.omitTemperature),
+    // A model that rejects temperature rejects it whatever the option says.
+    omitTemperature:
+      Boolean(controls.omitTemperature) ||
+      capabilities.sampling.temperature !== "configurable",
   };
 }
 
@@ -943,6 +996,13 @@ export async function refreshModelCapabilityRegistry(
     return false;
   }
   if (registryRefreshTask) return registryRefreshTask;
+  if (
+    !options.force &&
+    registryFailedAt > 0 &&
+    now() - registryFailedAt < FAILED_REFRESH_RETRY_MS
+  ) {
+    return false;
+  }
   registryRefreshTask = (async () => {
     const fetchFn = getFetch();
     if (!fetchFn) return false;
@@ -950,19 +1010,27 @@ export async function refreshModelCapabilityRegistry(
     const controller = AbortControllerCtor
       ? new AbortControllerCtor()
       : undefined;
-    const timer = controller
-      ? setTimeout(
-          () => controller.abort(),
-          options.timeoutMs || DEFAULT_REFRESH_TIMEOUT_MS,
-        )
-      : null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller?.abort();
+        reject(new Error("Model capability registry request timed out."));
+      }, options.timeoutMs || DEFAULT_REFRESH_TIMEOUT_MS);
+    });
     try {
-      const response = await fetchFn(MODEL_CAPABILITY_REGISTRY_URL, {
-        headers: { Accept: "application/json" },
-        signal: controller?.signal,
-      });
-      if (!response.ok) return false;
-      const text = await response.text();
+      const response = await Promise.race([
+        fetchFn(MODEL_CAPABILITY_REGISTRY_URL, {
+          headers: { Accept: "application/json" },
+          signal: controller?.signal,
+        }),
+        deadline,
+      ]);
+      if (!response.ok) {
+        registryFailedAt = now();
+        return false;
+      }
+      registryFailedAt = 0;
+      const text = await Promise.race([response.text(), deadline]);
       if (text.length > MODEL_CAPABILITY_REGISTRY_MAX_BYTES) return false;
       const parsed = validateRegistry(JSON.parse(text));
       if (!parsed) return false;
@@ -976,9 +1044,10 @@ export async function refreshModelCapabilityRegistry(
       notify();
       return true;
     } catch {
+      registryFailedAt = now();
       return false;
     } finally {
-      if (timer !== null) clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
   })();
   try {
@@ -1173,6 +1242,13 @@ export async function refreshModelCatalog(
   ) {
     return cached.models;
   }
+  if (
+    cached?.stale &&
+    !options.force &&
+    now() - (catalogAttemptedAt.get(key) ?? 0) < FAILED_CATALOG_RETRY_MS
+  ) {
+    return cached.models;
+  }
   // Coalesce concurrent refreshes: several UI rows can ask for the same
   // provider catalog in the same tick and must share one network request.
   const inFlight = catalogRefreshTasks.get(key);
@@ -1193,6 +1269,7 @@ async function fetchModelCatalog(
   cached: CatalogSnapshot | undefined,
 ): Promise<DiscoveredModel[]> {
   const generation = ++nextCatalogFetchGeneration;
+  catalogAttemptedAt.set(key, now());
   for (const existingKey of Array.from(catalogFetchGenerations.keys())) {
     if (
       existingKey === key ||
@@ -1218,12 +1295,11 @@ async function fetchModelCatalog(
         timeoutMs: options.timeoutMs || DEFAULT_REFRESH_TIMEOUT_MS,
       });
       if (isCurrentGeneration()) {
-        setCatalogSnapshot(key, identity, {
+        publishCatalogSnapshot(key, identity, {
           models,
           fetchedAt: now(),
           stale: false,
         });
-        notify();
       }
       return models;
     } catch (error) {
@@ -1249,8 +1325,7 @@ async function fetchModelCatalog(
       error: "Enter the API key above to fetch this provider's models.",
     };
     if (isCurrentGeneration()) {
-      setCatalogSnapshot(key, identity, snapshot);
-      notify();
+      publishCatalogSnapshot(key, identity, snapshot);
     }
     return snapshot.models;
   }
@@ -1266,8 +1341,7 @@ async function fetchModelCatalog(
         error: "Invalid API URL for models endpoint.",
       };
       if (isCurrentGeneration()) {
-        setCatalogSnapshot(key, identity, snapshot);
-        notify();
+        publishCatalogSnapshot(key, identity, snapshot);
       }
       return snapshot.models;
     }
@@ -1296,7 +1370,7 @@ async function fetchModelCatalog(
         headers.Authorization = `Bearer ${identity.apiKey.trim()}`;
       }
     }
-    const response = await new Promise<Response>((resolve, reject) => {
+    const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         timedOut = true;
         controller?.abort();
@@ -1304,18 +1378,21 @@ async function fetchModelCatalog(
         abortErr.name = "AbortError";
         reject(abortErr);
       }, timeoutMs);
+    });
+    const response = await Promise.race([
       fetchFn(endpoint, {
         headers,
         signal: controller?.signal,
-      }).then(resolve, reject);
-    });
+      }),
+      deadline,
+    ]);
     if (!response.ok) {
       const classified = classifyModelDiscoveryHttpError(response.status);
       throw new CatalogFetchError(classified.code, classified.message);
     }
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = await Promise.race([response.json(), deadline]);
     } catch {
       throw new CatalogFetchError(
         "invalid_json",
@@ -1348,19 +1425,17 @@ async function fetchModelCatalog(
         error: "No available chat models returned by provider.",
       };
       if (isCurrentGeneration()) {
-        setCatalogSnapshot(key, identity, emptySnapshot);
-        notify();
+        publishCatalogSnapshot(key, identity, emptySnapshot);
         return [];
       }
       return catalogSnapshots.get(key)?.models || [];
     }
     if (isCurrentGeneration()) {
-      setCatalogSnapshot(key, identity, {
+      publishCatalogSnapshot(key, identity, {
         models,
         fetchedAt: now(),
         stale: false,
       });
-      notify();
       return models;
     }
     return catalogSnapshots.get(key)?.models || models;
@@ -1389,8 +1464,7 @@ async function fetchModelCatalog(
       error: errorMessage,
     };
     if (isCurrentGeneration()) {
-      setCatalogSnapshot(key, identity, snapshot);
-      notify();
+      publishCatalogSnapshot(key, identity, snapshot);
       return snapshot.models;
     }
     return catalogSnapshots.get(key)?.models || snapshot.models;
@@ -1404,6 +1478,16 @@ export function invalidateModelCatalog(identity: ModelCatalogIdentity): void {
   for (const existingKey of Array.from(catalogFetchGenerations.keys())) {
     if (isSameCatalogConfiguration(existingKey, identity)) {
       catalogFetchGenerations.set(existingKey, invalidationGeneration);
+    }
+  }
+  // An invalidated response cannot publish, and new callers must not inherit
+  // its promise either. The old task's identity-checked finalizer cannot
+  // delete the replacement request.
+  for (const tasks of [catalogRefreshTasks, capabilityPreflightTasks]) {
+    for (const existingKey of Array.from(tasks.keys())) {
+      if (isSameCatalogConfiguration(existingKey, identity)) {
+        tasks.delete(existingKey);
+      }
     }
   }
   let removed = false;
@@ -1458,12 +1542,14 @@ export function resetModelCapabilityStateForTests(): void {
   activeRegistrySource = "bundled";
   registryLoadTask = null;
   registryFetchedAt = 0;
+  registryFailedAt = 0;
   registryRefreshTask = null;
   capabilityPreflightTasks.clear();
   catalogRefreshTasks.clear();
   catalogFetchGenerations.clear();
   nextCatalogFetchGeneration = 0;
   catalogSnapshots.clear();
+  catalogAttemptedAt.clear();
   runtime = {};
 }
 

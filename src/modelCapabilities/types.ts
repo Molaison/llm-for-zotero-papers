@@ -36,6 +36,8 @@ export type ModelCapabilityIdentity = {
   authMode?: string;
   /** Runtime scope, for example a Claude bridge profile signature. */
   scope?: string;
+  /** Authenticated limits for this invocation, never a catalog/cache identity. */
+  requestModelLimits?: ModelCapabilityLimits;
   /**
    * User-authored overrides for this model, applied on top of every detected
    * source. Carried on the identity so capability resolution stays a pure

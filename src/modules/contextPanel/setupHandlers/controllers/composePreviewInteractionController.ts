@@ -1,6 +1,5 @@
 import { t } from "../../../../utils/i18n";
 import { clearUserAddedContextForItem } from "../../contextSelectionActions";
-import { getConversationKey } from "../../conversationIdentity";
 import {
   getActiveContextAttachmentFromTabs,
   getSelectedTextContextEntries,
@@ -147,7 +146,6 @@ export function attachComposePreviewInteractionController(
     removeUnmanagedSelectedFileCopies(item.id);
     const result = clearUserAddedContextForItem({
       itemId: item.id,
-      conversationKey: getConversationKey(item),
       textContextKey: deps.getTextContextConversationKey(),
     });
     deps.closePaperChipMenu();
@@ -395,9 +393,7 @@ export function attachComposePreviewInteractionController(
             (_, itemIndex) => itemIndex !== index,
           );
           composeContextStore.collections.replace(item.id, next);
-          composeContextStore.initializedConversations.mark(
-            getConversationKey(item),
-          );
+          composeContextStore.initializedConversations.mark(item.id);
           deps.updatePaperPreviewPreservingScroll();
           setStatus(t("Collection context removed."), "ready");
         }
@@ -415,11 +411,36 @@ export function attachComposePreviewInteractionController(
         if (Number.isFinite(index) && index >= 0 && index < tags.length) {
           const next = tags.filter((_, itemIndex) => itemIndex !== index);
           composeContextStore.tags.replace(item.id, next);
-          composeContextStore.initializedConversations.mark(
-            getConversationKey(item),
-          );
+          composeContextStore.initializedConversations.mark(item.id);
           deps.updatePaperPreviewPreservingScroll();
           setStatus(t("Tag context removed."), "ready");
+        }
+        return;
+      }
+
+      const conversationClearBtn = target.closest(
+        ".llm-conversation-clear",
+      ) as HTMLButtonElement | null;
+      if (conversationClearBtn) {
+        event.preventDefault();
+        event.stopPropagation();
+        const index = Number.parseInt(
+          conversationClearBtn.dataset.conversationIndex || "",
+          10,
+        );
+        const conversations = composeContextStore.attachedConversations.list(
+          item.id,
+        );
+        if (
+          Number.isFinite(index) &&
+          index >= 0 &&
+          index < conversations.length
+        ) {
+          composeContextStore.attachedConversations.replace(
+            item.id,
+            conversations.filter((_, itemIndex) => itemIndex !== index),
+          );
+          deps.updatePaperPreviewPreservingScroll();
         }
         return;
       }
@@ -457,9 +478,7 @@ export function attachComposePreviewInteractionController(
       } else {
         clearSelectedPaperState(item.id);
       }
-      composeContextStore.initializedConversations.mark(
-        getConversationKey(item),
-      );
+      composeContextStore.initializedConversations.mark(item.id);
       deps.updatePaperPreviewPreservingScroll();
       setStatus(`Paper context removed (${nextPapers.length})`, "ready");
       deps.closePaperChipMenu();

@@ -154,7 +154,7 @@ describe("webchat isolation", function () {
       ensureStart,
     );
     const forkCacheLoad = source.indexOf(
-      "await loadConversationForkLinkCache(conversationKey);",
+      "await loadConversationForkLinkCache(conversationKey, loadGeneration);",
       loadedShortcut,
     );
     const loadedReturn = source.indexOf("return;", forkCacheLoad);
@@ -491,7 +491,7 @@ describe("webchat isolation", function () {
     );
     const setterStart = source.indexOf("const setDraftInputForConversation =");
     const persistStart = source.indexOf(
-      "const persistDraftInputForCurrentConversation = () => {",
+      "const persistDraftInputForCurrentConversation = (",
       setterStart,
     );
     const restoreStart = source.indexOf(

@@ -6,7 +6,11 @@ import type {
 } from "../src/agent/types";
 import { buildExternalBridgeContextEnvelopeForTests } from "../src/agent/externalBackendBridge";
 import { buildCodexNativeVisibleTurnContextBlockForTests } from "../src/codexAppServer/nativeClient";
-import { buildQuestionWithSelectedTextContexts } from "../src/modules/contextPanel/textUtils";
+import {
+  buildQuestionWithSelectedTextContexts,
+  resolvePromptText,
+} from "../src/modules/contextPanel/textUtils";
+import { SELECTED_TEXT_QUESTIONS_INSTRUCTION } from "../src/services/context/selectedTextAnchorFormatting";
 import type {
   ResolvedSelectedTextAnchor,
   SelectedTextContext,
@@ -152,5 +156,149 @@ describe("highlight-aware backend payloads", function () {
     assert.include(block, "page_label=588");
     assert.include(block, "The highlighted claim and its explanation.");
     assert.include(block, "read PDF page 588");
+  });
+
+  describe("a chip's question", function () {
+    const questionContext: SelectedTextContext = {
+      ...selectedTextContext,
+      userQuery: "Is this claim supported?",
+    };
+
+    it("follows the quoted text for direct API and webchat prompts", function () {
+      for (const includeAnchorContext of [false, true]) {
+        const prompt = buildQuestionWithSelectedTextContexts(
+          [questionContext.text],
+          ["pdf"],
+          "Is this claim supported?",
+          {
+            selectedTextContexts: [questionContext],
+            resolvedSelectedTextAnchors: [resolvedAnchor],
+            includeAnchorContext,
+          },
+        );
+        assert.include(
+          prompt,
+          `"""\n${questionContext.text}\n"""\nQuestion about this text:\nIs this claim supported?`,
+        );
+      }
+    });
+
+    it("follows the quoted text in plugin Agent messages", async function () {
+      const request: AgentRuntimeRequest = resolvedAgentRequest({
+        conversationKey: 30304,
+        mode: "agent",
+        userText: "Is this claim supported?",
+        libraryID: 1,
+        selectedTextContexts: [
+          questionContext,
+          { text: "A second quote.", source: "model" },
+        ],
+        selectedTexts: [questionContext.text, "A second quote."],
+        selectedTextSources: ["pdf", "model"],
+        selectedTextPaperContexts: [questionContext.paperContext, undefined],
+      });
+      const messages = await buildAgentInitialMessages(request, [], []);
+      const text = [...messages]
+        .reverse()
+        .filter((message) => message.role === "user")
+        .map(messageText)
+        .join("\n");
+
+      assert.include(
+        text,
+        `"""\n${questionContext.text}\n"""\nQuestion about this text:\nIs this claim supported?`,
+      );
+      assert.include(text, '"""\nA second quote.\n"""');
+      assert.notInclude(
+        text,
+        '"""\nA second quote.\n"""\nQuestion about this text:',
+      );
+    });
+
+    it("prints each question once in plugin Agent messages when the composer is empty", async function () {
+      const contexts: SelectedTextContext[] = [
+        questionContext,
+        { text: "A second quote.", source: "model", userQuery: "Why here?" },
+      ];
+      const userText = resolvePromptText(
+        "",
+        questionContext.text,
+        false,
+        contexts,
+      );
+      const request: AgentRuntimeRequest = resolvedAgentRequest({
+        conversationKey: 30306,
+        mode: "agent",
+        userText,
+        libraryID: 1,
+        selectedTextContexts: contexts,
+        selectedTexts: contexts.map((context) => context.text),
+        selectedTextSources: ["pdf", "model"],
+        selectedTextPaperContexts: [questionContext.paperContext, undefined],
+      });
+      const messages = await buildAgentInitialMessages(request, [], []);
+      const text = [...messages]
+        .reverse()
+        .filter((message) => message.role === "user")
+        .map(messageText)
+        .join("\n");
+
+      for (const question of ["Is this claim supported?", "Why here?"]) {
+        assert.equal(text.split(question).length - 1, 1, question);
+      }
+      assert.include(
+        text,
+        '"""\nA second quote.\n"""\nQuestion about this text:\nWhy here?',
+      );
+      assert.include(
+        text,
+        `User request:\n${SELECTED_TEXT_QUESTIONS_INSTRUCTION}`,
+      );
+    });
+
+    it("keeps typed text as the plugin Agent user request", async function () {
+      const request: AgentRuntimeRequest = resolvedAgentRequest({
+        conversationKey: 30307,
+        mode: "agent",
+        userText: "Compare it with the intro.",
+        libraryID: 1,
+        selectedTextContexts: [questionContext],
+        selectedTexts: [questionContext.text],
+        selectedTextSources: ["pdf"],
+        selectedTextPaperContexts: [questionContext.paperContext],
+      });
+      const messages = await buildAgentInitialMessages(request, [], []);
+      const text = [...messages]
+        .reverse()
+        .filter((message) => message.role === "user")
+        .map(messageText)
+        .join("\n");
+
+      assert.include(text, "User request:\nCompare it with the intro.");
+      assert.notInclude(text, SELECTED_TEXT_QUESTIONS_INSTRUCTION);
+      assert.equal(text.split("Is this claim supported?").length - 1, 1);
+    });
+
+    it("rides in the Claude bridge envelope rows", function () {
+      const envelope = buildExternalBridgeContextEnvelopeForTests({
+        conversationKey: 30305,
+        mode: "agent",
+        userText: "Is this claim supported?",
+        libraryID: 1,
+        selectedTextContexts: [
+          questionContext,
+          { text: "A second quote.", source: "model" },
+        ],
+        selectedTexts: [questionContext.text, "A second quote."],
+        selectedTextSources: ["pdf", "model"],
+        selectedTextPaperContexts: [questionContext.paperContext, undefined],
+      });
+
+      assert.equal(
+        envelope.selectedTexts[0]?.userQuery,
+        "Is this claim supported?",
+      );
+      assert.notProperty(envelope.selectedTexts[1], "userQuery");
+    });
   });
 });

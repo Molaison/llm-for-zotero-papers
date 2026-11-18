@@ -29,16 +29,19 @@ import type { PaperContextRef } from "../src/shared/types";
 import { resolvedAgentRequest } from "./helpers/resolvedAgentRequest";
 
 const BALANCED_EVIDENCE_PHRASES = [
-  "Support paper-specific explanations with paragraph-end citations",
-  "Paragraph citations mean this explanation is supported by these passages",
+  "Support paper-specific claims with sentence citations to supplied source passages",
+  "end each supported sentence, before its final punctuation, with one token for all its passages",
+  "A sentence without a supporting passage, such as a transition or your own synthesis, gets no token",
+  "Sentence citations mean this sentence is supported by these passages",
   "Introduce a recommended passage with why the reader should read it",
   "After a direct quote, do not merely paraphrase it",
   "source labels on their own line belong only after direct blockquotes",
   "Paper titles, headings, author lists, journal names, DOI blocks, and source labels are metadata, not direct evidence",
+  "Use supplied IDs only and never construct one; to quote a passage without an ID, use a `>` blockquote with its source label on the next line and no cite token.",
 ];
 
 const DIRECT_QUOTE_SAFETY_PHRASES = [
-  "copied verbatim in the original source language",
+  "copied verbatim in the original source language, exactly as supplied, including extraction artifacts",
   "put the sourceLabel on the next non-empty line",
   "Do not invent author/year/page/section labels",
   "[[source=...]]",
@@ -118,9 +121,17 @@ describe("quote guidance prompts", function () {
       "your very first action MUST be",
     );
   });
-  it("defines paragraph support and reading recommendations in one canonical contract", function () {
+  it("defines sentence support and reading recommendations in one canonical contract", function () {
     assert.include(PAPER_CITATION_CONTRACT, BALANCED_EVIDENCE_GUIDANCE);
     assert.include(PAPER_CITATION_CONTRACT, "[[cite:ID1,ID2]]");
+    assert.include(
+      PAPER_CITATION_CONTRACT,
+      "the effect was weaker (r = 0.34) [[cite:Q_x7a2]].",
+    );
+    assert.notMatch(
+      PAPER_CITATION_CONTRACT,
+      /paragraph[- ]end|per paragraph|paragraph ends|paragraph citation|paragraph footer/i,
+    );
     assertCanonicalCitationContract(PAPER_CITATION_CONTRACT);
   });
 

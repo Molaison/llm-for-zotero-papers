@@ -16,7 +16,6 @@ import type {
   WorkflowTestApi,
   WorkflowTestFixture,
 } from "../src/modules/contextPanel/workflowTestTypes";
-import { sendMouseEvent } from "./helpers/pointerEvent";
 
 const LAYOUT_PREF = "extensions.zotero.llmforzotero.sidebarLayout";
 const THEME_PREF = "browser.theme.toolbar-theme";
@@ -124,8 +123,7 @@ describe("workflow: plugin section head matches the native heads", function () {
       .getElementById("zotero-collections-pane")
       ?.getBoundingClientRect();
     if (!tree?.width) return;
-    sendMouseEvent(
-      win,
+    win.windowUtils.sendMouseEvent(
       "mousemove",
       tree.left + tree.width / 2,
       tree.top + tree.height / 2,

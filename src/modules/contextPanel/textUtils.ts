@@ -1,5 +1,8 @@
 import { appLogger } from "../../core/logging";
-import { SELECTED_TEXT_MAX_LENGTH } from "./constants";
+import {
+  SELECTED_TEXT_MAX_LENGTH,
+  SIDECHAT_SELECTED_TEXT_MAX_LENGTH,
+} from "./constants";
 import { synthesizeSelectedTextContexts } from "../../services/context/normalizers";
 import type {
   PaperContextRef,
@@ -18,7 +21,11 @@ import {
 } from "../../services/quotes/quoteCitations";
 import {
   formatSelectedTextLocator,
+  formatSelectedTextQuestionSuffix,
+  isPromptOnlySelectedTextQuestions,
+  joinSelectedTextQuestions,
   renderSelectedTextAnchorContext,
+  SELECTED_TEXT_QUESTIONS_INSTRUCTION,
 } from "../../services/context/selectedTextAnchorFormatting";
 import { t } from "../../utils/i18n";
 import { sanitizeText } from "../../utils/textSanitization";
@@ -27,30 +34,50 @@ export const DEFAULT_SELECTED_TEXT_PROMPT =
   "Please explain this selected text.";
 export const DEFAULT_FILE_ANALYSIS_PROMPT = "Please analyze attached files.";
 
+/**
+ * The block that closes a selected-text prompt. When the prompt is only the
+ * chip questions (empty composer), each question already follows its quote,
+ * so a short instruction replaces the repeated "User question:" block.
+ */
+function formatUserQuestionBlock(
+  normalizedPrompt: string,
+  contexts: readonly Pick<SelectedTextContext, "userQuery">[],
+): string {
+  return isPromptOnlySelectedTextQuestions(
+    normalizedPrompt,
+    contexts,
+    sanitizeText,
+  )
+    ? SELECTED_TEXT_QUESTIONS_INSTRUCTION
+    : `User question:\n${normalizedPrompt}`;
+}
+
 function buildQuestionWithSelectedNoteText(
   selectedText: string,
   userPrompt: string,
+  userQuery?: string,
 ): string {
   const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
   return [
     "Selected text from a Zotero note:",
-    `"""\n${selectedText}\n"""`,
+    `"""\n${selectedText}\n"""${formatSelectedTextQuestionSuffix(userQuery)}`,
     "",
-    `User question:\n${normalizedPrompt}`,
+    formatUserQuestionBlock(normalizedPrompt, [{ userQuery }]),
   ].join("\n");
 }
 
 function buildQuestionWithNoteEditingText(
   selectedText: string,
   userPrompt: string,
+  userQuery?: string,
 ): string {
   const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
   return [
     "Selected text from the current Zotero note editor (editing focus):",
-    `"""\n${selectedText}\n"""`,
+    `"""\n${selectedText}\n"""${formatSelectedTextQuestionSuffix(userQuery)}`,
     "The user selected this snippet inside the active note and wants help editing it in place.",
     "",
-    `User question:\n${normalizedPrompt}`,
+    formatUserQuestionBlock(normalizedPrompt, [{ userQuery }]),
   ].join("\n");
 }
 
@@ -59,12 +86,20 @@ export function normalizeSelectedText(
   source?: SelectedTextSource,
 ): string {
   const sanitized = sanitizeText(text);
-  // Editing needs the selected characters, including paragraph boundaries.
-  const normalized =
-    source === "note-edit"
-      ? sanitized.replace(/\r\n?/g, "\n")
-      : sanitized.replace(/\s+/g, " ");
-  return normalized.trim().slice(0, SELECTED_TEXT_MAX_LENGTH);
+  // Editing needs the selected characters, including paragraph boundaries;
+  // a side-chat transcript keeps its Q:/A: lines.
+  const keepsLineBreaks = source === "note-edit" || source === "sidechat";
+  const normalized = keepsLineBreaks
+    ? sanitized.replace(/\r\n?/g, "\n")
+    : sanitized.replace(/\s+/g, " ");
+  return normalized
+    .trim()
+    .slice(
+      0,
+      source === "sidechat"
+        ? SIDECHAT_SELECTED_TEXT_MAX_LENGTH
+        : SELECTED_TEXT_MAX_LENGTH,
+    );
 }
 
 export function isLikelyCorruptedSelectedText(text: string): boolean {
@@ -135,9 +170,10 @@ export function isLikelyCorruptedSelectedText(text: string): boolean {
 export function buildQuestionWithSelectedText(
   selectedText: string,
   userPrompt: string,
+  userQuery?: string,
 ): string {
   const normalizedPrompt = userPrompt.trim() || DEFAULT_SELECTED_TEXT_PROMPT;
-  return `Selected text from the PDF reader:\n"""\n${selectedText}\n"""\n\nUser question:\n${normalizedPrompt}`;
+  return `Selected text from the PDF reader:\n"""\n${selectedText}\n"""${formatSelectedTextQuestionSuffix(userQuery)}\n\n${formatUserQuestionBlock(normalizedPrompt, [{ userQuery }])}`;
 }
 
 export function buildQuestionWithSelectedTextContexts(
@@ -183,18 +219,24 @@ export function buildQuestionWithSelectedTextContexts(
     !includePaperAttribution &&
     !formatSelectedTextLocator(contexts[0], anchorsByContextIndex.get(0))
   ) {
-    return buildQuestionWithSelectedText(normalizedTexts[0], normalizedPrompt);
+    return buildQuestionWithSelectedText(
+      normalizedTexts[0],
+      normalizedPrompt,
+      contexts[0].userQuery,
+    );
   }
   if (normalizedTexts.length === 1 && normalizedSources[0] === "note-edit") {
     return buildQuestionWithNoteEditingText(
       normalizedTexts[0],
       normalizedPrompt,
+      contexts[0].userQuery,
     );
   }
   if (normalizedTexts.length === 1 && normalizedSources[0] === "note") {
     return buildQuestionWithSelectedNoteText(
       normalizedTexts[0],
       normalizedPrompt,
+      contexts[0].userQuery,
     );
   }
   const contextBlocks = normalizedTexts.map((text, index) => {
@@ -206,7 +248,9 @@ export function buildQuestionWithSelectedTextContexts(
           ? "zotero_note"
           : source === "note-edit"
             ? "note_editor"
-            : "pdf_reader";
+            : source === "sidechat"
+              ? "side_chat_transcript"
+              : "pdf_reader";
     const paperLabel =
       includePaperAttribution && source === "pdf"
         ? formatPaperCitationLabel(selectedTextPaperContexts[index])
@@ -224,7 +268,10 @@ export function buildQuestionWithSelectedTextContexts(
       anchorsByContextIndex.get(index),
     );
     const locatorPart = locator ? ` ${locator}` : "";
-    return `Text Context ${index + 1} [source=${sourceLabel}]${paperPart}${citationPart}${locatorPart}:\n"""\n${text}\n"""`;
+    const questionPart = formatSelectedTextQuestionSuffix(
+      contexts[index].userQuery,
+    );
+    return `Text Context ${index + 1} [source=${sourceLabel}]${paperPart}${citationPart}${locatorPart}:\n"""\n${text}\n"""${questionPart}`;
   });
   const selectedTextQuoteCitations = includePaperAttribution
     ? buildSelectedTextQuoteCitations(
@@ -256,17 +303,28 @@ export function buildQuestionWithSelectedTextContexts(
     : "";
   const question = `Selected text contexts with explicit sources:\n${guidance}${contextBlocks.join(
     "\n\n",
-  )}\n\nUser question:\n${normalizedPrompt}`;
+  )}\n\n${formatUserQuestionBlock(normalizedPrompt, contexts)}`;
   return anchorContext ? `${question}\n\n${anchorContext}` : question;
 }
 
+/**
+ * The user-question text for a send. Composer text wins; with an empty
+ * composer, the questions attached to selected-text chips (in chip order,
+ * blank-line separated) replace the default selected-text prompt (D3).
+ */
 export function resolvePromptText(
   userInput: string,
   selectedText: string,
   hasAttachments: boolean,
+  selectedTextContexts?: readonly SelectedTextContext[],
 ): string {
   const normalizedInput = sanitizeText(userInput).trim();
   if (normalizedInput) return normalizedInput;
+  const chipQuestions = joinSelectedTextQuestions(
+    selectedTextContexts,
+    sanitizeText,
+  );
+  if (chipQuestions) return chipQuestions;
   if (sanitizeText(selectedText).trim()) return DEFAULT_SELECTED_TEXT_PROMPT;
   if (hasAttachments) return DEFAULT_FILE_ANALYSIS_PROMPT;
   return "";
@@ -359,13 +417,28 @@ export function getAttachmentTypeLabel(entry: {
   return "FILE";
 }
 
+/**
+ * Sets the footer status line. The idle "Ready" line takes the plain style
+ * a freshly mounted panel shows; other messages keep their variant's colour.
+ */
 export function setStatus(
   statusEl: HTMLElement,
   text: string,
   variant: "ready" | "sending" | "error" | "warning",
 ) {
+  const idle = variant === "ready" && (text === "Ready" || text === t("Ready"));
+  if (idle) {
+    setNeutralStatus(statusEl, text);
+    return;
+  }
   statusEl.textContent = text;
   statusEl.className = `llm-status llm-status-${variant}`;
+}
+
+/** A steady status label in the plain (mounted-panel) style. */
+export function setNeutralStatus(statusEl: HTMLElement, text: string) {
+  statusEl.textContent = text;
+  statusEl.className = "llm-status";
 }
 
 export function formatTokenCount(tokens: number): string {
@@ -449,6 +522,17 @@ export function setTokenUsage(
     cacheProvider?: string;
   } = {},
 ): void {
+  if (
+    typeof options.cacheHitRatio === "number" &&
+    Number.isFinite(options.cacheHitRatio)
+  ) {
+    const percent = Math.round(
+      Math.max(0, Math.min(1, options.cacheHitRatio)) * 100,
+    );
+    el.dataset.cache = `${t("Cache hit")} ${percent}%`;
+  } else {
+    delete el.dataset.cache;
+  }
   const normalizedTokens = Math.max(0, sessionTokens);
   if (
     typeof contextWindow === "number" &&
@@ -527,6 +611,7 @@ export function setTokenUsage(
   el.dataset.summary = presentation.summary;
   el.dataset.detail = presentation.detail;
   delete el.dataset.warning;
+  delete el.dataset.cache;
   el.style.display = "";
   if (gaugeEl) {
     gaugeEl.style.display = "inline-block";

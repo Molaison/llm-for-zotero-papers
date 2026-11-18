@@ -4,6 +4,8 @@ import {
   QUICKSEARCH_MAX_PROBES,
   buildQuicksearchProbes,
 } from "../src/agent/services/libraryRetrieveService";
+import { buildLibraryRetrieveModelView } from "../src/agent/services/libraryRetrieveModelView";
+import { groupPaperWorks } from "../src/agent/services/paperWorkIdentity";
 import { buildRetrievalQueryPlan } from "../src/services/retrieval/retrievalQueryPlan";
 import type { PaperContextCandidate } from "../src/services/paperContent/types";
 import type { PaperContextRef } from "../src/shared/types";
@@ -183,6 +185,91 @@ describe("LibraryRetrieveService", function () {
     assert.equal(result.answerContract.snippetCoverage, "sampled");
     assert.isUndefined(result.quoteCitations);
     assert.notProperty(result.snippets[0], "quoteCitationId");
+  });
+
+  describe("a snippet cap smaller than the papers' depth", function () {
+    function denoisingService(paperCount: number) {
+      const entries = Array.from({ length: paperCount }, (_, index) =>
+        makeItem(index + 1, `Denoising paper ${index + 1}`, "Denoising.", {
+          hasPdf: true,
+        }),
+      );
+      return new LibraryRetrieveService(
+        makeGateway(entries) as any,
+        {
+          ensurePaperContext: async () =>
+            makePdfContext(["Methods\nA denoising model is evaluated."]),
+        } as any,
+        async (paperContext): Promise<PaperContextCandidate[]> =>
+          [0, 1, 2].map((index) => ({
+            paperKey: `${paperContext.itemId}:${paperContext.contextItemId}`,
+            itemId: paperContext.itemId,
+            contextItemId: paperContext.contextItemId,
+            title: paperContext.title,
+            chunkIndex: index,
+            chunkText: `Candidate ${index} denoising evidence for ${paperContext.title}.`,
+            chunkKind: "methods",
+            estimatedTokens: 10,
+            bm25Score: 1,
+            embeddingScore: 0,
+            hybridScore: 1,
+            evidenceScore: 1 - index * 0.1,
+          })),
+      );
+    }
+    const retrieveDenoising = (paperCount: number, maxTotalSnippets: number) =>
+      denoisingService(paperCount).retrieve({
+        query: "denoising",
+        depth: "evidence",
+        methods: ["metadata", "abstract", "fts"],
+        maxFullTextPapers: paperCount,
+        perPaperTopK: 3,
+        maxTotalSnippets,
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: "Find denoising evidence",
+          libraryID: 1,
+        },
+      });
+
+    it("gives every paper one snippet before any paper a second", async function () {
+      const result = await retrieveDenoising(5, 5);
+      assert.lengthOf(result.snippets, 5);
+      assert.sameMembers(
+        result.snippets.map((snippet) => snippet.itemId),
+        ["1", "2", "3", "4", "5"],
+      );
+      const deeper = await retrieveDenoising(5, 7);
+      const counts = new Map<string, number>();
+      for (const snippet of deeper.snippets)
+        counts.set(snippet.itemId, (counts.get(snippet.itemId) || 0) + 1);
+      assert.deepEqual(
+        ["1", "2", "3", "4", "5"].map((itemId) => counts.get(itemId)),
+        [3, 1, 1, 1, 1],
+        "the top-up goes to the papers in rank order",
+      );
+    });
+
+    it("marks a paper the cap left without a snippet as not returned", async function () {
+      const result = await retrieveDenoising(7, 5);
+      const byId = new Map(
+        result.paperMatches.map((match) => [match.itemId, match]),
+      );
+      for (const itemId of ["1", "2", "3", "4", "5"]) {
+        assert.equal(byId.get(itemId)?.returnedSnippetCount, 1, itemId);
+        assert.isUndefined(byId.get(itemId)?.passageStatus, itemId);
+      }
+      for (const itemId of ["6", "7"]) {
+        assert.equal(byId.get(itemId)?.returnedSnippetCount, 0, itemId);
+        assert.equal(
+          byId.get(itemId)?.passageStatus,
+          "not_returned_budget",
+          itemId,
+        );
+      }
+      assert.equal(result.frontier.stopReason, "budget_limit");
+    });
   });
 
   it("summarize intent returns snippets as evidence without quote-card anchors", async function () {
@@ -888,6 +975,242 @@ describe("LibraryRetrieveService", function () {
     assert.equal(result.quoteCitations?.[0]?.sourceMatchKind, "exact");
     assert.equal(result.quoteCitations?.[0]?.sourceMatchSource, "context-text");
     assert.include(result.methodsUsed, "exact");
+  });
+
+  describe("verify mode matches whole words", function () {
+    async function verify(query: string, chunk: string) {
+      const service = new LibraryRetrieveService(
+        makeGateway([
+          makeItem(1, "Neutral title", "A method paper.", { hasPdf: true }),
+        ]) as any,
+        {
+          ensurePaperContext: async () => makePdfContext([chunk]),
+        } as any,
+        async () => [],
+      );
+      return service.retrieve({
+        query,
+        depth: "verify",
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: `Verify ${query}`,
+          libraryID: 1,
+        },
+      });
+    }
+
+    it("does not match a term inside a longer word", async function () {
+      const result = await verify(
+        "cell",
+        "Results\nThe excellent outcome held.",
+      );
+      assert.lengthOf(result.snippets, 0);
+    });
+
+    it("matches a term that is a whole word", async function () {
+      const result = await verify("cell", "Results\nThe cell counts rose.");
+      assert.lengthOf(result.snippets, 1);
+      assert.equal(result.snippets[0].matchMethod, "exact");
+    });
+
+    it("does not match a phrase that occurs only inside longer words", async function () {
+      const result = await verify(
+        "cell count",
+        "Results\nThe excellent counting method held.",
+      );
+      assert.lengthOf(result.snippets, 0);
+    });
+
+    it("matches a hyphenated term case-insensitively", async function () {
+      const result = await verify("IL-6", "Results\nSerum il-6 levels rose.");
+      assert.lengthOf(result.snippets, 1);
+    });
+
+    it("accepts an English plural of a whole word", async function () {
+      const result = await verify("neuron", "Results\nNeurons fired in CA1.");
+      assert.lengthOf(result.snippets, 1);
+    });
+
+    it("rejects other suffixes after a term", async function () {
+      assert.lengthOf(
+        (await verify("cell", "Results\nA cellular state held.")).snippets,
+        0,
+      );
+      assert.lengthOf(
+        (await verify("rat", "Results\nThe rating rose.")).snippets,
+        0,
+      );
+    });
+
+    it("accepts a plural after the last word of a phrase", async function () {
+      const result = await verify(
+        "place cell",
+        "Results\nPlace cells remapped.",
+      );
+      assert.lengthOf(result.snippets, 1);
+    });
+
+    it("keeps substring matching for CJK terms", async function () {
+      const result = await verify("神经元", "结果\n海马神经元活动增加。");
+      assert.lengthOf(result.snippets, 1);
+    });
+  });
+
+  describe("verify mode cites a snippet's body text", function () {
+    async function verify(query: string, chunk: string) {
+      const service = new LibraryRetrieveService(
+        makeGateway([
+          makeItem(1, "Neutral title", "A method paper.", { hasPdf: true }),
+        ]) as any,
+        {
+          ensurePaperContext: async () => makePdfContext([chunk]),
+        } as any,
+        async () => [],
+      );
+      const result = await service.retrieve({
+        query,
+        depth: "verify",
+        request: {
+          conversationKey: 1,
+          mode: "agent",
+          userText: `Verify ${query}`,
+          libraryID: 1,
+        },
+      });
+      assert.lengthOf(result.snippets, 1);
+      return {
+        snippet: result.snippets[0],
+        quotes: result.quoteCitations || [],
+      };
+    }
+    const flat = (text: string) => text.replace(/\s+/g, " ").trim();
+    const unescapedDollars = (text: string) =>
+      (text.match(/(?<!\\)\$/g) || []).length;
+
+    it("starts the quote at the body when the snippet opens with a heading", async function () {
+      const body =
+        "Organisms continually tune their perceptual systems to the features they encounter in their environment. We have studied how ongoing experience reorganizes the synaptic connectivity of neurons in the olfactory cortex of the mouse.";
+      const { snippet, quotes } = await verify(
+        "synaptic connectivity",
+        `# Summary\n\n${body}`,
+      );
+      // The model still sees the snippet as before.
+      assert.equal(snippet.snippet, `# Summary ${body}`);
+      assert.lengthOf(quotes, 1);
+      assert.equal(snippet.quoteCitationId, quotes[0].id);
+      assert.equal(quotes[0].quoteText, body);
+      assert.include(flat(snippet.snippet), flat(quotes[0].quoteText));
+    });
+
+    it("starts the quote at the body when a heading line runs straight into it", async function () {
+      const body =
+        "In the rodent brain, the main olfactory bulb is one of two regions where neurogenesis persists throughout the lifetime of the animal.";
+      const { snippet, quotes } = await verify(
+        "olfactory bulb",
+        `## Introduction\n${body}`,
+      );
+      assert.equal(snippet.snippet, `## Introduction ${body}`);
+      assert.lengthOf(quotes, 1);
+      assert.equal(quotes[0].quoteText, body);
+    });
+
+    it("never runs a quote across a heading inside the snippet", async function () {
+      const before =
+        "The recordings were stable across all sessions of the experiment, and the cells kept their place fields.";
+      const after =
+        "We recorded the activity of hippocampal neurons across many days while mice explored a familiar track.";
+      const { snippet, quotes } = await verify(
+        "place fields",
+        `${before}\n\n# 4 | DISCUSSION\n\n${after}`,
+      );
+      assert.equal(snippet.snippet, `${before} # 4 | DISCUSSION ${after}`);
+      assert.lengthOf(quotes, 1);
+      assert.equal(quotes[0].quoteText, before);
+    });
+
+    it("drops the tail of a heading the window cut into", async function () {
+      const earlier =
+        "Earlier sections describe the surgery and the training schedule in full detail for every animal.";
+      const heading = "# Summary of the recorded population activity";
+      const lead = [1, 2, 3, 4, 5]
+        .map(
+          (i) => `Session ${i} kept the same decoding performance as before.`,
+        )
+        .join(" ");
+      const body = `${lead} Ongoing experience reorganizes the synaptic connectivity of cortical neurons.`;
+      const { snippet, quotes } = await verify(
+        "synaptic connectivity",
+        `${earlier} ${earlier}\n\n${heading}\n\n${body}`,
+      );
+      // The window opens inside the heading line.
+      assert.isTrue(snippet.snippet.startsWith("..."), snippet.snippet);
+      assert.notInclude(snippet.snippet, "# Summary");
+      assert.include(snippet.snippet, "population activity");
+      assert.lengthOf(quotes, 1);
+      assert.isTrue(
+        quotes[0].quoteText.startsWith("Session 1"),
+        quotes[0].quoteText,
+      );
+      assert.include(flat(snippet.snippet), flat(quotes[0].quoteText));
+    });
+
+    it("mints no quote for a snippet that is only a heading", async function () {
+      const { snippet, quotes } = await verify(
+        "hippocampal place codes",
+        "# Slow drift of hippocampal place codes across many weeks of maze training",
+      );
+      assert.isEmpty(quotes);
+      assert.notProperty(snippet, "quoteCitationId");
+    });
+
+    it("trims a quote the snippet window cut inside a formula", async function () {
+      const head =
+        "The model predicted steering in synthetic settings with high accuracy.";
+      const filler = [1, 2, 3, 4, 5]
+        .map(
+          (i) => ` Session ${i} kept the same decoding performance as before.`,
+        )
+        .join("");
+      // The window ends 360 characters after the match, inside the formula.
+      const formula = " $( \\rho = 0 . 7 7$ , $p \\dot < 0 . 0 0 1$ ) for all.";
+      const chunk = `${head}${filler}${formula} The fit held for every animal in the second cohort.`;
+      const { snippet, quotes } = await verify("predicted steering", chunk);
+      assert.equal(
+        unescapedDollars(snippet.snippet) % 2,
+        1,
+        "the window cut the formula",
+      );
+      assert.lengthOf(quotes, 1);
+      const quote = quotes[0].quoteText;
+      assert.equal(unescapedDollars(quote) % 2, 0, quote);
+      assert.notInclude(quote, "\\rho");
+      assert.include(flat(snippet.snippet), flat(quote));
+      assert.isTrue(quote.startsWith(head), quote);
+      assert.isTrue(quote.endsWith("as before."), quote);
+    });
+
+    it("keeps an ordinary snippet as its quote", async function () {
+      const chunk =
+        "Results\nThe calcium imaging analysis pipeline used deconvolution with $\\tau = 0 . 5$ s and recovered spikes reliably.";
+      const { snippet, quotes } = await verify(
+        "calcium imaging analysis",
+        chunk,
+      );
+      assert.lengthOf(quotes, 1);
+      assert.equal(quotes[0].quoteText, snippet.snippet);
+    });
+
+    it("never shows the model the quote's internal source text", async function () {
+      const { snippet } = await verify(
+        "synaptic connectivity",
+        "# Summary\n\nWe have studied how ongoing experience reorganizes the synaptic connectivity of neurons in the cortex.",
+      );
+      assert.deepEqual(
+        Object.keys(snippet).filter((key) => /quoteSource/i.test(key)),
+        [],
+      );
+    });
   });
 
   it("searches explicit item scopes even when metadata and quicksearch do not match", async function () {
@@ -2966,5 +3289,440 @@ describe("LibraryRetrieveService review fixes", function () {
       result.warnings.some((warning) => warning.includes("LOW CONFIDENCE")),
       `warnings were: ${JSON.stringify(result.warnings)}`,
     );
+  });
+});
+
+describe("LibraryRetrieveService exact-match ranking", function () {
+  it("keeps the strongest exact matches of one paper, not the first in document order", async function () {
+    const weak = (n: number) =>
+      `Section ${n}\nThe zebrafish cohort was imaged.`;
+    const strong = (n: number) =>
+      `Section ${n}\nThe zebrafish cohort showed calcium transients in hippocampal neurons during sleep.`;
+    const service = new LibraryRetrieveService(
+      makeGateway([makeItem(1, "Imaging paper", "", { hasPdf: true })]) as any,
+      {
+        ensurePaperContext: async () =>
+          makePdfContext([
+            weak(1),
+            weak(2),
+            weak(3),
+            strong(4),
+            strong(5),
+            strong(6),
+          ]),
+      } as any,
+      async () => [],
+    );
+
+    const result = await service.retrieve({
+      query:
+        "zebrafish cohort calcium transients hippocampal neurons during sleep",
+      depth: "verify",
+      perPaperTopK: 3,
+      scope: { libraryID: 1, itemIds: [1] },
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Verify the zebrafish calcium claim",
+        libraryID: 1,
+      },
+    });
+
+    const exact = result.snippets.filter(
+      (snippet) => snippet.matchMethod === "exact",
+    );
+    assert.deepEqual(
+      exact.map((snippet) => Number(snippet.chunkIndex)).sort((a, b) => a - b),
+      [3, 4, 5],
+    );
+  });
+
+  it("breaks equal-score ties by item id, not by title", async function () {
+    const entries = [
+      makeItem(7, "Aardvark neuron study", "", { hasPdf: true }),
+      makeItem(3, "Zebra neuron study", "", { hasPdf: true }),
+    ];
+    const service = new LibraryRetrieveService(
+      makeGateway(entries) as any,
+      {
+        ensurePaperContext: async () =>
+          makePdfContext(["Methods\nThe shared quasar phrase appears here."]),
+      } as any,
+      async () => [],
+    );
+
+    const result = await service.retrieve({
+      query: "shared quasar phrase",
+      depth: "verify",
+      scope: { libraryID: 1, itemIds: [7, 3] },
+      request: {
+        conversationKey: 1,
+        mode: "agent",
+        userText: "Verify the shared quasar phrase",
+        libraryID: 1,
+      },
+    });
+
+    const order = result.snippets.map((snippet) => snippet.itemId);
+    assert.deepEqual(order, ["3", "7"]);
+  });
+});
+
+describe("LibraryRetrieveService abstract-only papers and same-work marking", function () {
+  const request = {
+    conversationKey: 1,
+    mode: "agent" as const,
+    userText: "Find the hexagonal spatial map claim",
+    libraryID: 1,
+  };
+  const ROOMY = 1_000_000;
+
+  it("returns a no-PDF paper's matching abstract as one abstract passage that is not body evidence", async function () {
+    const entries = [
+      makeItem(
+        1,
+        "Grid cells in entorhinal cortex",
+        "Grid cells encode a hexagonal spatial map of the environment.",
+        { hasPdf: false },
+      ),
+      makeItem(2, "Unrelated imaging paper", "", { hasPdf: true }),
+    ];
+    const service = new LibraryRetrieveService(
+      makeGateway(entries) as any,
+      {
+        ensurePaperContext: async () =>
+          makePdfContext(["Methods\nCalcium imaging of zebrafish larvae."]),
+      } as any,
+      async () => [],
+    );
+    const input = {
+      query: "hexagonal spatial map",
+      depth: "verify" as const,
+      scope: { libraryID: 1, itemIds: [1, 2] },
+    };
+    const result = await service.retrieve({ ...input, request });
+
+    const abstractPassages = result.snippets.filter(
+      (snippet) => snippet.itemId === "1",
+    );
+    assert.lengthOf(abstractPassages, 1);
+    const [passage] = abstractPassages;
+    assert.equal(passage.sourceKind, "abstract");
+    assert.equal(passage.chunkKind, "abstract");
+    assert.equal(passage.matchMethod, "metadata");
+    assert.include(passage.snippet, "hexagonal spatial map");
+    assert.isUndefined(passage.contextItemId, "no attachment to anchor");
+    assert.isUndefined(passage.quoteCitationId, "no quote anchor");
+    assert.notInclude(
+      (result.quoteCitations || []).map((citation) => String(citation.itemId)),
+      "1",
+    );
+    assert.equal(
+      result.answerContract.papersBodyRead,
+      0,
+      "an abstract is not body evidence",
+    );
+
+    const content = buildLibraryRetrieveModelView({
+      input,
+      result,
+      roomTokens: ROOMY,
+    })!.content as Record<string, any>;
+    assert.include(
+      content.paperMatches.map((row: { itemId: string }) => row.itemId),
+      "1",
+    );
+    assert.equal(
+      content.snippets.find((row: { itemId: string }) => row.itemId === "1")
+        ?.sourceKind,
+      "abstract",
+    );
+  });
+
+  it("returns no abstract passage in verify when the abstract lacks the exact phrase, and lists the paper as not read", async function () {
+    const entries = [
+      makeItem(
+        1,
+        "Grid cells in entorhinal cortex",
+        "Grid cells fire in hexagonal patterns.",
+        { hasPdf: false },
+      ),
+      makeItem(2, "Spatial map paper", "", { hasPdf: true }),
+    ];
+    const service = new LibraryRetrieveService(
+      makeGateway(entries) as any,
+      {
+        ensurePaperContext: async () =>
+          makePdfContext([
+            "Results\nPlace cells form a hexagonal spatial map in this task.",
+          ]),
+      } as any,
+      async () => [],
+    );
+    const input = {
+      query: "hexagonal spatial map",
+      depth: "verify" as const,
+      scope: { libraryID: 1, itemIds: [1, 2] },
+    };
+    const result = await service.retrieve({ ...input, request });
+
+    assert.notInclude(
+      result.snippets.map((snippet) => snippet.itemId),
+      "1",
+    );
+    const row = result.paperMatches.find((match) => match.itemId === "1");
+    assert.equal(row?.passageStatus, "no_pdf_attachment");
+    const content = buildLibraryRetrieveModelView({
+      input,
+      result,
+      roomTokens: ROOMY,
+    })!.content as Record<string, any>;
+    const viewRow = content.paperMatches.find(
+      (entry: { itemId: string }) => entry.itemId === "1",
+    );
+    assert.equal(viewRow?.passageStatus, "no_pdf_attachment");
+    assert.equal(viewRow?.title, "Grid cells in entorhinal cortex");
+  });
+
+  it("marks a preprint and its journal version as one work, and never groups by a short title alone", async function () {
+    const entries = [
+      makeItem(1, "Sparse coding of natural images in visual cortex"),
+      makeItem(2, "Sparse Coding of Natural Images in Visual Cortex: a model"),
+      makeItem(3, "Introduction"),
+      makeItem(4, "Introduction"),
+      makeItem(5, "Introduction"),
+      makeItem(6, "Introduction"),
+      makeItem(7, "Attention for sequence models"),
+      makeItem(8, "Transformers: the preprint"),
+    ];
+    entries[0].metadata.fields.DOI = "10.48550/arXiv.2301.00001";
+    entries[1].metadata.fields.DOI = "10.1016/j.neuron.2024.01.001";
+    entries[1].target.year = "2023";
+    entries[3].metadata.creators = [
+      { creatorType: "author", firstName: "Bo", lastName: "Jones" },
+    ];
+    entries[6].metadata.fields.url = "https://arxiv.org/abs/2302.12345v2";
+    entries[7].metadata.fields.DOI = "10.48550/arXiv.2302.12345";
+    entries[7].metadata.creators = [
+      { creatorType: "author", firstName: "Bo", lastName: "Jones" },
+    ];
+    const service = new LibraryRetrieveService(
+      makeGateway(entries) as any,
+      {
+        ensurePaperContext: async () =>
+          makePdfContext(["Methods\nA model is evaluated."]),
+      } as any,
+      async (paperContext): Promise<PaperContextCandidate[]> => [
+        {
+          paperKey: `${paperContext.itemId}:${paperContext.contextItemId}`,
+          itemId: paperContext.itemId,
+          contextItemId: paperContext.contextItemId,
+          title: paperContext.title,
+          chunkIndex: 1,
+          chunkText: `Methods\nThe model of paper ${paperContext.itemId} is evaluated.`,
+          chunkKind: "methods",
+          estimatedTokens: 10,
+          bm25Score: 1,
+          embeddingScore: 0,
+          hybridScore: 1,
+          evidenceScore: 1,
+        },
+      ],
+    );
+    const result = await service.retrieve({
+      query: "model",
+      depth: "evidence",
+      methods: ["metadata", "abstract", "fts"],
+      scope: {
+        libraryID: 1,
+        itemIds: entries.map((entry) => entry.target.itemId),
+      },
+      request,
+    });
+
+    const byId = new Map(
+      result.paperMatches.map((match) => [match.itemId, match]),
+    );
+    assert.lengthOf(result.paperMatches, 8, "rows are marked, not merged");
+    assert.isString(byId.get("1")?.workGroupId);
+    assert.equal(
+      byId.get("1")?.workGroupId,
+      byId.get("2")?.workGroupId,
+      "same title before the subtitle, first creator and close years",
+    );
+    for (const itemId of ["3", "4", "5", "6"]) {
+      assert.notProperty(byId.get(itemId)!, "workGroupId", itemId);
+    }
+    assert.isString(byId.get("7")?.workGroupId);
+    assert.equal(
+      byId.get("7")?.workGroupId,
+      byId.get("8")?.workGroupId,
+      "an arXiv URL and an arXiv DOI name one work",
+    );
+    assert.notEqual(byId.get("1")?.workGroupId, byId.get("7")?.workGroupId);
+    assert.lengthOf(result.snippets, 8, "every item keeps its passage");
+    assert.equal(result.resourcePool.queryCoverage.evidencePapers, 8);
+    assert.equal(result.resourcePool.queryCoverage.evidenceWorks, 6);
+
+    const content = buildLibraryRetrieveModelView({
+      input: {},
+      result,
+      roomTokens: ROOMY,
+    })!.content as Record<string, any>;
+    const viewRow = content.paperMatches.find(
+      (row: { itemId: string }) => row.itemId === "2",
+    );
+    assert.equal(viewRow?.workGroupId, byId.get("2")?.workGroupId);
+  });
+});
+
+describe("abstract-only passages need two distinct query terms", function () {
+  const request = {
+    conversationKey: 1,
+    mode: "agent" as const,
+    userText: "q",
+    libraryID: 1,
+  };
+  async function abstractPassageFor(abstract: string, query: string) {
+    const entries = [
+      makeItem(1, "A paper", abstract, { hasPdf: false }),
+      makeItem(2, "Other", "", { hasPdf: true }),
+    ];
+    const service = new LibraryRetrieveService(
+      makeGateway(entries) as any,
+      {
+        ensurePaperContext: async () => makePdfContext(["Methods\nNothing."]),
+      } as any,
+      async () => [],
+    );
+    const result = await service.retrieve({
+      query,
+      depth: "evidence",
+      scope: { libraryID: 1, itemIds: [1, 2] },
+      request,
+    });
+    return result.snippets.filter((snippet) => snippet.itemId === "1");
+  }
+
+  it("adds no abstract passage for one shared term out of two", async function () {
+    assert.lengthOf(
+      await abstractPassageFor(
+        "Hexagonal firing patterns appear in many regions.",
+        "hexagonal spatial map",
+      ),
+      0,
+    );
+  });
+
+  it("adds an abstract passage for two shared terms", async function () {
+    assert.lengthOf(
+      await abstractPassageFor(
+        "Hexagonal firing forms a spatial code.",
+        "hexagonal spatial map",
+      ),
+      1,
+    );
+  });
+
+  it("does not count a term found only inside a longer word", async function () {
+    assert.lengthOf(
+      await abstractPassageFor(
+        "Excellent hexagonal results were seen.",
+        "hexagonal cell",
+      ),
+      0,
+    );
+  });
+});
+
+describe("groupPaperWorks title and creator key", function () {
+  const paper = (itemId: number, title: string, year: string) => ({
+    itemId,
+    title,
+    firstCreatorLastName: "Devlin",
+    year,
+  });
+
+  it("groups a short main title with a long subtitle by its full title", function () {
+    const title =
+      "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding";
+    const groups = groupPaperWorks([
+      paper(1, title, "2018"),
+      paper(2, title, "2019"),
+    ]);
+    assert.equal(groups.get(1), groups.get(2));
+    assert.isString(groups.get(1));
+  });
+
+  it("groups CJK titles of at least eight letters, not shorter ones", function () {
+    const long = groupPaperWorks([
+      paper(1, "深度双向变换器的语言理解预训练", "2018"),
+      paper(2, "深度双向变换器的语言理解预训练", "2019"),
+    ]);
+    assert.isString(long.get(1));
+    assert.equal(long.get(1), long.get(2));
+    const short = groupPaperWorks([
+      paper(1, "语言理解预训练", "2018"),
+      paper(2, "语言理解预训练", "2019"),
+    ]);
+    assert.equal(short.size, 0);
+  });
+
+  it("keeps Part I, Part II and a review of one series as three works", function () {
+    const base = "Neural dynamics of decision making";
+    const groups = groupPaperWorks([
+      paper(1, `${base}: Part I. Theory`, "2020"),
+      paper(2, `${base}: Part II. Experiments`, "2021"),
+      paper(3, `${base}: a review`, "2022"),
+    ]);
+    assert.equal(groups.size, 0);
+  });
+
+  it("groups a titled-subtitle version with the bare title one year apart", function () {
+    const base = "Neural dynamics of decision making";
+    const groups = groupPaperWorks([
+      paper(1, `${base}: Part I. Theory`, "2020"),
+      paper(2, base, "2021"),
+    ]);
+    assert.isString(groups.get(1));
+    assert.equal(groups.get(1), groups.get(2));
+  });
+
+  it("never puts two versions more than two years apart in one group, even through a middle one", function () {
+    const title = "Neural dynamics of decision making in animals";
+    const groups = groupPaperWorks([
+      paper(1, title, "2019"),
+      paper(2, title, "2020"),
+      paper(3, title, "2022"),
+    ]);
+    assert.equal(groups.get(1), groups.get(2));
+    assert.isUndefined(groups.get(3));
+  });
+
+  it("does not group two chapters that share the book's DOI", function () {
+    const groups = groupPaperWorks([
+      { ...paper(1, "Chapter one on memory", "2020"), doi: "10.1000/book" },
+      { ...paper(2, "Chapter two on attention", "2020"), doi: "10.1000/book" },
+    ]);
+    assert.equal(groups.size, 0);
+  });
+
+  it("still groups a preprint (arXiv DOI) with its journal version of the same title", function () {
+    const title = "Neural dynamics of decision making in animals";
+    const groups = groupPaperWorks([
+      { ...paper(1, title, "2020"), doi: "10.48550/arXiv.2001.01234" },
+      { ...paper(2, title, "2021"), doi: "10.1000/journal" },
+    ]);
+    assert.isString(groups.get(1));
+    assert.equal(groups.get(1), groups.get(2));
+    const byArxiv = groupPaperWorks([
+      { ...paper(1, title, "2020"), doi: "10.48550/arXiv.2001.01234" },
+      {
+        ...paper(2, "Another title", "2024"),
+        doi: "10.1000/journal",
+        extra: "arXiv: 2001.01234",
+      },
+    ]);
+    assert.equal(byArxiv.get(1), byArxiv.get(2), "arXiv id is unconditional");
   });
 });

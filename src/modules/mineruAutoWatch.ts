@@ -67,6 +67,7 @@ const READINESS_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000] as const;
 let notifierId: string | null = null;
 let processingQueue: QueueEntry[] = [];
 let isProcessing = false;
+let watchGeneration = 0;
 let isPaused = false;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let currentAbort: AbortController | null = null;
@@ -351,6 +352,7 @@ function getRemovedItemIdsForCleanup(
 async function processQueue(): Promise<void> {
   if (isProcessing || isPaused || processingQueue.length === 0) return;
 
+  const generation = watchGeneration;
   isProcessing = true;
   isPaused = false;
   currentStatusMessage = "Starting MinerU auto-parse...";
@@ -360,6 +362,7 @@ async function processQueue(): Promise<void> {
   let errorCount = 0;
 
   while (processingQueue.length > 0) {
+    if (generation !== watchGeneration) return;
     if (isPaused) {
       break;
     }
@@ -382,25 +385,27 @@ async function processQueue(): Promise<void> {
     }
     const entryItem = validation.item;
 
-    if (
-      (
-        await getMineruAvailabilityForAttachment(entryItem, {
-          validateSyncedPackage: false,
-        })
-      ).status !== "missing"
-    ) {
-      appLogger.debug(
-        `MinerU auto-parse: skipping available item ${entry.attachmentId}`,
-      );
-      continue;
-    }
-
     const AbortCtor = getAbortControllerCtor();
     const abort = AbortCtor ? new AbortCtor() : null;
     currentAbort = abort;
     currentAttachmentId = entry.attachmentId;
 
     try {
+      if (
+        (
+          await getMineruAvailabilityForAttachment(entryItem, {
+            validateSyncedPackage: false,
+          })
+        ).status !== "missing"
+      ) {
+        if (generation !== watchGeneration) return;
+        appLogger.debug(
+          `MinerU auto-parse: skipping available item ${entry.attachmentId}`,
+        );
+        continue;
+      }
+
+      if (generation !== watchGeneration) return;
       const pdfItem = getValidatedQueueItem(entry);
       if (!pdfItem) {
         discardStaleEntry(entry, "attachment changed before parse");
@@ -413,6 +418,7 @@ async function processQueue(): Promise<void> {
         }
       ).getFilePathAsync?.();
 
+      if (generation !== watchGeneration) return;
       if (!pdfPath) {
         appLogger.debug(
           `MinerU auto-parse: no file path for ${entry.attachmentId}`,
@@ -430,6 +436,7 @@ async function processQueue(): Promise<void> {
       const { value: result } = await runMineruTaskOnce(
         entry.attachmentId,
         async (report, sharedSignal) => {
+          if (generation !== watchGeneration) throw new MineruCancelledError();
           setItemProcessing(entry.attachmentId);
           const parsed = await parsePdfWithMineru(
             pdfPath as string,
@@ -440,7 +447,9 @@ async function processQueue(): Promise<void> {
               maxPages: getMineruMaxAutoPages(),
             },
           );
-          if (sharedSignal?.aborted) throw new MineruCancelledError();
+          if (sharedSignal?.aborted || generation !== watchGeneration) {
+            throw new MineruCancelledError();
+          }
           if (!parsed?.mdContent) return parsed;
 
           if (!getValidatedQueueItem(entry)) {
@@ -450,6 +459,7 @@ async function processQueue(): Promise<void> {
           }
 
           await publishMineruParsedResult(pdfItem, parsed, sharedSignal);
+          if (generation !== watchGeneration) throw new MineruCancelledError();
           setItemCached(entry.attachmentId);
           void publishMineruCachePackageForAttachment(entry.attachmentId).then(
             (published) => {
@@ -467,6 +477,7 @@ async function processQueue(): Promise<void> {
           return parsed;
         },
         (stage) => {
+          if (generation !== watchGeneration) return;
           lastProgressStage = stage;
           currentStatusMessage = `${stage} — ${entry.title}`;
           notifyProgress();
@@ -474,6 +485,7 @@ async function processQueue(): Promise<void> {
         abort?.signal,
       );
 
+      if (generation !== watchGeneration) return;
       if (result?.mdContent) {
         processedCount++;
         currentStatusMessage = `Cached: ${entry.title}`;
@@ -491,6 +503,7 @@ async function processQueue(): Promise<void> {
         );
       }
     } catch (e) {
+      if (generation !== watchGeneration) return;
       if (e instanceof StaleAutoWatchAttachmentError) {
         discardStaleEntry(entry, e.message);
         continue;
@@ -544,15 +557,18 @@ async function processQueue(): Promise<void> {
       setItemFailed(entry.attachmentId, errorMsg);
       appLogger.warn(`MinerU auto-parse: error processing ${entry.title}:`, e);
     } finally {
-      if (currentAttachmentId === entry.attachmentId) {
-        currentAttachmentId = null;
-        currentAbort = null;
+      if (generation === watchGeneration) {
+        if (currentAttachmentId === entry.attachmentId) {
+          currentAttachmentId = null;
+          currentAbort = null;
+        }
+        staleAbortAttachmentIds.delete(entry.attachmentId);
+        stoppedAbortAttachmentIds.delete(entry.attachmentId);
       }
-      staleAbortAttachmentIds.delete(entry.attachmentId);
-      stoppedAbortAttachmentIds.delete(entry.attachmentId);
     }
   }
 
+  if (generation !== watchGeneration) return;
   currentAbort = null;
   currentAttachmentId = null;
   currentItemTitle = "";
@@ -564,6 +580,10 @@ async function processQueue(): Promise<void> {
         ? getReadinessRetryStatusMessage()
         : "";
   notifyProgress();
+
+  // Resume may arrive before an aborted owner has settled. Its requeued item
+  // must not be stranded merely because resume saw isProcessing still true.
+  if (!isPaused && processingQueue.length > 0) void processQueue();
 
   if (processedCount > 0) {
     showNotification(
@@ -621,6 +641,7 @@ async function enqueuePdfIfEligible(
   parentItemId: number | undefined,
   event: "add" | "modify",
   filenameMatcher: MineruFilenameMatcher,
+  generation: number,
 ): Promise<void> {
   if (event === "modify" && !shouldConsiderModifiedPdf(pdf.id)) return;
 
@@ -628,6 +649,7 @@ async function enqueuePdfIfEligible(
   const eligibility = await getMineruParseEligibility(parentItem, pdf, {
     filenameMatcher,
   });
+  if (generation !== watchGeneration) return;
   if (eligibility.excluded) {
     appLogger.debug(
       `MinerU auto-parse: PDF ${pdf.id} excluded by parse filter (${
@@ -648,6 +670,7 @@ async function enqueuePdfIfEligible(
     return;
   }
 
+  if (generation !== watchGeneration) return;
   appLogger.debug(`MinerU auto-parse: enqueuing ${title}`);
   enqueueForProcessing(pdf.id, title, parentItemId);
 }
@@ -658,6 +681,7 @@ async function handleItemNotification(
   ids: Array<string | number>,
 ): Promise<void> {
   if (type !== "item") return;
+  const generation = watchGeneration;
 
   const itemIds = ids
     .map(normalizeNotifierId)
@@ -681,6 +705,7 @@ async function handleItemNotification(
   const filenameMatcher = buildMineruFilenameMatcher();
 
   for (const itemId of itemIds) {
+    if (generation !== watchGeneration) return;
     const item = Zotero.Items.get(itemId);
     if (!item) continue;
 
@@ -695,7 +720,14 @@ async function handleItemNotification(
       );
       for (const pdf of pdfs) {
         const title = item.getField?.("title") || `Item ${pdf.id}`;
-        await enqueuePdfIfEligible(pdf, title, item.id, event, filenameMatcher);
+        await enqueuePdfIfEligible(
+          pdf,
+          title,
+          item.id,
+          event,
+          filenameMatcher,
+          generation,
+        );
       }
     } else if (isPdfAttachment(item)) {
       const parentItem = item.parentID ? Zotero.Items.get(item.parentID) : null;
@@ -709,6 +741,7 @@ async function handleItemNotification(
         item.parentID || undefined,
         event,
         filenameMatcher,
+        generation,
       );
     }
   }
@@ -792,6 +825,7 @@ export function resumeAutoWatch(): void {
 }
 
 export function stopAutoWatch(): void {
+  watchGeneration++;
   if (currentAttachmentId !== null) {
     stoppedAbortAttachmentIds.add(currentAttachmentId);
   }
@@ -888,6 +922,7 @@ export function isAutoWatchQueueEntryCurrentForTests(
 }
 
 export function resetAutoWatchForTests(): void {
+  watchGeneration++;
   if (currentAttachmentId !== null) {
     stoppedAbortAttachmentIds.add(currentAttachmentId);
   }

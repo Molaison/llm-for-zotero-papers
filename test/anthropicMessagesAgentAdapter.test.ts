@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AnthropicMessagesAgentAdapter } from "../src/agent/model/anthropicMessages";
+import { planContextCacheReuse } from "../src/contextCache/manager";
+import { ModelStreamInterruptedError } from "../src/agent/model/completion";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
 import type {
   AgentModelMessage,
@@ -412,7 +414,8 @@ describe("AnthropicMessagesAgentAdapter", function () {
 
     assert.isArray(capturedBody?.system);
     const system = capturedBody?.system as Array<Record<string, unknown>>;
-    assert.notProperty(system[0] || {}, "cache_control");
+    // A lone stable block also leaves a breakpoint on the fixed prompt.
+    assert.deepEqual(system[0]?.cache_control, { type: "ephemeral" });
     assert.deepEqual(system[1]?.cache_control, { type: "ephemeral" });
     assert.equal(system[1]?.text, "Stable Zotero resource context");
   });
@@ -558,6 +561,122 @@ describe("AnthropicMessagesAgentAdapter", function () {
     assert.deepEqual(system[2]?.cache_control, { type: "ephemeral" });
   });
 
+  it("caches an agent turn with no resource context within four breakpoints", async function () {
+    // Anthropic accepts at most four cache breakpoints per request; the
+    // request-level breakpoint counts toward them.
+    const contextCache = planContextCacheReuse({
+      model: "claude-haiku-5-5",
+      apiBase: "https://api.anthropic.com/v1",
+      protocol: "anthropic_messages",
+      mode: "full",
+      strategy: "agent-stable-resources",
+      contextText: "",
+    });
+    assert.isTrue(contextCache.enabled);
+    const countBreakpoints = (body: Record<string, unknown>) =>
+      JSON.stringify(body).split('"cache_control"').length - 1;
+    const twoTools = [
+      ...tools,
+      {
+        name: "search_paper",
+        description: "search",
+        inputSchema: { type: "object" },
+        executionClass: "read" as const,
+        requiresConfirmation: false,
+      },
+    ];
+
+    for (const stableBlocks of [0, 1, 3]) {
+      const adapter = new AnthropicMessagesAgentAdapter();
+      const requestBodies: Record<string, unknown>[] = [];
+      (
+        globalThis as typeof globalThis & {
+          ztoolkit: { getGlobal: (name: string) => unknown };
+        }
+      ).ztoolkit = {
+        getGlobal: (name: string) => {
+          if (name !== "fetch") return undefined;
+          return async (_url: string, init?: RequestInit) => {
+            requestBodies.push(
+              JSON.parse(String(init?.body || "{}")) as Record<string, unknown>,
+            );
+            return requestBodies.length === 1
+              ? {
+                  ok: true,
+                  status: 200,
+                  statusText: "OK",
+                  body: makeSseStream([
+                    'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_paper","input":{}}}\n\n',
+                    'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+                    'data: {"type":"message_stop"}\n\n',
+                  ]),
+                  json: async () => ({}),
+                  text: async () => "",
+                }
+              : {
+                  ok: true,
+                  status: 200,
+                  statusText: "OK",
+                  body: undefined,
+                  json: async () => ({
+                    content: [{ type: "text", text: "Done" }],
+                  }),
+                  text: async () => "",
+                };
+          };
+        },
+      };
+      const request = makeRequest({ model: "claude-haiku-5-5", contextCache });
+      const firstStep = await adapter.runStep({
+        request,
+        messages: [
+          { role: "system", content: "Fixed agent prompt" },
+          ...Array.from({ length: stableBlocks }, (_, index) => ({
+            role: "system" as const,
+            content: `Stable resource block ${index}`,
+            cachePolicy: "stable-prefix" as const,
+          })),
+          { role: "user", content: "Search methods" },
+        ],
+        tools: twoTools,
+      });
+      if (firstStep.kind !== "tool_calls") {
+        assert.fail("expected a tool call");
+        return;
+      }
+      await adapter.runStep({
+        request,
+        messages: [
+          firstStep.assistantMessage,
+          {
+            role: "tool",
+            tool_call_id: "toolu_1",
+            name: "read_paper",
+            content: '{"matches":[]}',
+          },
+        ],
+        tools: twoTools,
+      });
+
+      assert.lengthOf(requestBodies, 2);
+      for (const body of requestBodies) {
+        assert.isAtMost(countBreakpoints(body), 4, `${stableBlocks} blocks`);
+        assert.deepEqual(body.cache_control, { type: "ephemeral" });
+        const bodyTools = body.tools as Array<Record<string, unknown>>;
+        assert.deepEqual(bodyTools[bodyTools.length - 1]?.cache_control, {
+          type: "ephemeral",
+        });
+        const system = body.system as Array<Record<string, unknown>>;
+        assert.deepEqual(system[system.length - 1]?.cache_control, {
+          type: "ephemeral",
+        });
+        if (stableBlocks === 1) {
+          assert.deepEqual(system[0]?.cache_control, { type: "ephemeral" });
+        }
+      }
+    }
+  });
+
   it("streams text deltas from native messages SSE", async function () {
     const adapter = new AnthropicMessagesAgentAdapter();
     const deltas: string[] = [];
@@ -597,6 +716,125 @@ describe("AnthropicMessagesAgentAdapter", function () {
     assert.deepEqual(deltas, ["Hello ", "world"]);
   });
 
+  it("classifies a stream cut inside a content block as interrupted, and an overloaded error event too", async function () {
+    const stream = (frames: string[]) => {
+      (
+        globalThis as typeof globalThis & {
+          ztoolkit: { getGlobal: (name: string) => unknown };
+        }
+      ).ztoolkit = {
+        getGlobal: (name: string) =>
+          name === "fetch"
+            ? async () => ({
+                ok: true,
+                status: 200,
+                statusText: "OK",
+                body: makeSseStream(frames),
+                json: async () => ({}),
+                text: async () => "",
+              })
+            : undefined,
+      };
+      return new AnthropicMessagesAgentAdapter()
+        .runStep({
+          request: makeRequest(),
+          messages: [{ role: "user", content: "Answer" }],
+          tools,
+        })
+        .then(
+          (step) => step,
+          (error: unknown) => error,
+        );
+    };
+    const cut = await stream([
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Half an"}}\n\n',
+    ]);
+    assert.instanceOf(cut, ModelStreamInterruptedError);
+    const overloaded = await stream([
+      'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+    ]);
+    assert.instanceOf(overloaded, ModelStreamInterruptedError);
+    assert.equal((overloaded as ModelStreamInterruptedError).status, 529);
+    // A provider that ends its stream between blocks without a terminal
+    // event is taken as finished.
+    const closed = (await stream([
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Whole."}}\n\n',
+      'data: {"type":"content_block_stop","index":0}\n\n',
+    ])) as { kind?: string; text?: string };
+    assert.equal(closed.kind, "final");
+    assert.equal(closed.text, "Whole.");
+  });
+
+  it("keeps no empty or thinking-only assistant turn for the next request", async function () {
+    for (const content of [
+      [],
+      [
+        {
+          type: "thinking",
+          thinking: "Weighing the lookalikes.",
+          signature: "sig",
+        },
+      ],
+    ]) {
+      const bodies: Array<{
+        messages: Array<{ role: string; content: unknown }>;
+      }> = [];
+      (
+        globalThis as typeof globalThis & {
+          ztoolkit: { getGlobal: (name: string) => unknown };
+        }
+      ).ztoolkit = {
+        getGlobal: (name: string) =>
+          name === "fetch"
+            ? async (_url: string, init?: RequestInit) => {
+                bodies.push(JSON.parse(String(init?.body || "{}")));
+                const reply =
+                  bodies.length === 1
+                    ? { content, stop_reason: "end_turn" }
+                    : {
+                        content: [{ type: "text", text: "Not confirmed." }],
+                        stop_reason: "end_turn",
+                      };
+                return {
+                  ok: true,
+                  status: 200,
+                  statusText: "OK",
+                  body: undefined,
+                  json: async () => reply,
+                  text: async () => JSON.stringify(reply),
+                };
+              }
+            : undefined,
+      };
+      const adapter = new AnthropicMessagesAgentAdapter();
+      const first = await adapter.runStep({
+        request: makeRequest(),
+        messages: [{ role: "user", content: "Answer now, without tools." }],
+        tools,
+        toolChoice: "none",
+      });
+      assert.equal(first.kind, "final");
+      const second = await adapter.runStep({
+        request: makeRequest(),
+        messages: [{ role: "user", content: "Answer now, without tools." }],
+        continuationMessages: [
+          { role: "user", content: "Your last reply had no answer text." },
+        ],
+        tools,
+        toolChoice: "none",
+      });
+      assert.equal(second.kind, "final");
+      const sent = bodies[1].messages;
+      assert.isFalse(
+        sent.some((message) => message.role === "assistant"),
+        JSON.stringify(sent),
+      );
+      assert.equal(sent[sent.length - 1].role, "user");
+    }
+  });
+
   it("streams thinking deltas separately from answer text", async function () {
     const adapter = new AnthropicMessagesAgentAdapter();
     const reasoning: string[] = [];
@@ -616,6 +854,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
             'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan first."}}\n\n',
             'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n',
             'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Final answer."}}\n\n',
+            'data: {"type":"message_stop"}\n\n',
           ]),
           json: async () => ({}),
           text: async () => "",
@@ -667,6 +906,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
                 'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-123"}}\n\n',
                 'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_456","name":"read_paper","input":{}}}\n\n',
                 'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"methods\\"}"}}\n\n',
+                'data: {"type":"message_stop"}\n\n',
               ]),
               json: async () => ({}),
               text: async () => "",
@@ -743,6 +983,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
           body: makeSseStream([
             'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bad","name":"read_paper","input":{}}}\n\n',
             'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"action\\":\\"write\\",\\"content\\":\\"secret draft"}}\n\n',
+            'data: {"type":"message_stop"}\n\n',
           ]),
           json: async () => ({}),
           text: async () => "",
@@ -877,6 +1118,7 @@ describe("AnthropicMessagesAgentAdapter", function () {
                 'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan first"}}\n\n',
                 'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_paper","input":{"query":"a"}}}\n\n',
                 'data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_2","name":"read_paper","input":{"query":"b"}}}\n\n',
+                'data: {"type":"message_stop"}\n\n',
               ]),
               json: async () => ({}),
               text: async () => "",
@@ -1483,6 +1725,69 @@ describe("AnthropicMessagesAgentAdapter", function () {
       "does not support image input or PDF/document input",
     );
   });
+
+  it("counts cached tokens in the prompt it reports", async function () {
+    const usage = {
+      input_tokens: 100,
+      cache_read_input_tokens: 9000,
+      cache_creation_input_tokens: 500,
+      output_tokens: 50,
+    };
+    for (const streaming of [false, true]) {
+      const adapter = new AnthropicMessagesAgentAdapter();
+      const samples: Array<Record<string, unknown>> = [];
+      (
+        globalThis as typeof globalThis & {
+          ztoolkit: { getGlobal: (name: string) => unknown };
+        }
+      ).ztoolkit = {
+        getGlobal: (name: string) => {
+          if (name !== "fetch") return undefined;
+          return async () => ({
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            body: streaming
+              ? makeSseStream([
+                  `data: ${JSON.stringify({ type: "message_start", message: { usage: { ...usage, output_tokens: 1 } } })}\n\n`,
+                  'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}\n\n',
+                  'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}\n\n',
+                  'data: {"type":"message_stop"}\n\n',
+                ])
+              : undefined,
+            json: async () => ({
+              content: [{ type: "text", text: "OK" }],
+              stop_reason: "end_turn",
+              usage,
+            }),
+            text: async () => "",
+          });
+        },
+      };
+      await adapter.runStep({
+        request: makeRequest(),
+        messages: [{ role: "user", content: "Search methods" }],
+        tools,
+        onUsage: (sample) => {
+          samples.push(sample as unknown as Record<string, unknown>);
+        },
+      });
+      const label = streaming ? "streaming" : "non-streaming";
+      assert.deepInclude(
+        samples[0],
+        {
+          promptTokens: 9600,
+          contextTokens: 9600,
+          cacheReadTokens: 9000,
+          cacheWriteTokens: 500,
+          cacheHitRatio: 0.9375,
+          contextWindowIsAuthoritative: true,
+        },
+        label,
+      );
+      if (!streaming) assert.equal(samples[0].totalTokens, 9650, label);
+    }
+  });
 });
 
 describe("AnthropicMessagesAgentAdapter output cap versus context window", function () {
@@ -1496,7 +1801,10 @@ describe("AnthropicMessagesAgentAdapter output cap versus context window", funct
     ).ztoolkit = originalToolkit;
   });
 
-  async function captureMaxTokens(userText: string): Promise<number> {
+  async function captureMaxTokens(
+    userText: string,
+    model = "claude-opus-4-6",
+  ): Promise<number> {
     let capturedBody: Record<string, unknown> | null = null;
     (
       globalThis as typeof globalThis & {
@@ -1530,7 +1838,7 @@ describe("AnthropicMessagesAgentAdapter output cap versus context window", funct
         conversationKey: 1,
         mode: "agent",
         userText,
-        model: "claude-opus-4-6",
+        model,
         apiBase: "https://api.anthropic.com",
         apiKey: "test",
         providerProtocol: "anthropic_messages",
@@ -1549,12 +1857,18 @@ describe("AnthropicMessagesAgentAdapter output cap versus context window", funct
     assert.equal(await captureMaxTokens("Summarize this paper."), 128_000);
   });
 
-  it("shrinks max_tokens so a long prompt plus the cap still fits the 200k window", async function () {
+  it("keeps the full cap for a long prompt inside the 1M window", async function () {
     // ~100k estimated input tokens of ASCII prose (4 chars per token).
     const longText = "word ".repeat(80_000);
-    const maxTokens = await captureMaxTokens(longText);
+    assert.equal(await captureMaxTokens(longText), 128_000);
+  });
+
+  it("shrinks max_tokens so a long prompt plus the cap still fits the 200k window", async function () {
+    // ~150k estimated input tokens against Haiku 4.5's 200k window.
+    const longText = "word ".repeat(120_000);
+    const maxTokens = await captureMaxTokens(longText, "claude-haiku-4-5");
     assert.isAtLeast(maxTokens, 8_192);
-    assert.isAtMost(maxTokens, 80_000);
-    assert.isAtMost(100_000 + maxTokens, 200_000);
+    assert.isBelow(maxTokens, 64_000);
+    assert.isAtMost(150_000 + maxTokens, 200_000);
   });
 });

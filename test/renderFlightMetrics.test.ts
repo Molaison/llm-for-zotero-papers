@@ -143,7 +143,7 @@ describe("render flight metrics", function () {
       assert.deepEqual(
         new Set(stalled.releasedBy),
         new Set(["timer"]),
-        "every block in the stalled run is released by the injected stall timer, which a real 450 ms timer could never do inside a synchronous push loop",
+        "every block in the stalled run is released by the injected stall timer, which a real 120 ms timer could never do inside a synchronous push loop",
       );
     });
   });

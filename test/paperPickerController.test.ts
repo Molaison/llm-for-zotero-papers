@@ -6,6 +6,7 @@ import {
   positionPaperPickerForAnchor,
 } from "../src/modules/contextPanel/setupHandlers/controllers/paperPickerController";
 import { MAX_SELECTED_PAPER_CONTEXTS } from "../src/modules/contextPanel/constants";
+import { libraryIndexService } from "../src/services/libraryIndexService";
 import {
   getPaperSearchItemTagNames,
   invalidatePaperSearchCache,
@@ -54,10 +55,6 @@ function makeRegularItem(index: number): Zotero.Item {
       }
     },
   } as unknown as Zotero.Item;
-}
-
-function makeOwnerItem(itemId: number): Zotero.Item {
-  return { id: itemId, isAttachment: () => false } as Zotero.Item;
 }
 
 function makeAttachment(
@@ -377,6 +374,132 @@ describe("paper picker placement", function () {
 });
 
 describe("paper picker controller", function () {
+  it("keeps debounced and in-flight queries live during batch selection", async function () {
+    const globalScope = globalThis as typeof globalThis & {
+      Zotero?: unknown;
+      ztoolkit?: unknown;
+    };
+    const originalZotero = globalScope.Zotero;
+    const originalToolkit = globalScope.ztoolkit;
+    const originalGetSnapshot = libraryIndexService.getSnapshot;
+    const itemId = 47;
+    const titles = ["OldResult", "NewResult"];
+    const papers = titles.map((title, index) => {
+      const paper = makeRegularItem(index + 1);
+      const getField = paper.getField.bind(paper);
+      paper.getField = ((field: string) =>
+        field === "title" ? title : getField(field as any)) as typeof getField;
+      return paper;
+    });
+    const attachments = [makeAttachment(1), makeAttachment(2)];
+    const items = new Map(
+      [...papers, ...attachments].map((item) => [item.id, item]),
+    );
+    const fakeDocument = new FakeDocument();
+    const body = fakeDocument.createElementNS("", "div");
+    const picker = fakeDocument.createElementNS("", "div");
+    const list = fakeDocument.createElementNS("", "div");
+    const inputBox = makeFakeInput("@OldResult");
+    let releaseSnapshot: (() => void) | undefined;
+    globalScope.Zotero = {
+      Items: {
+        getAll: async () => papers,
+        get: (id: number) => items.get(id) || null,
+      },
+      Collections: { getByLibrary: () => [] },
+      Libraries: { getName: () => "My Library" },
+    };
+    globalScope.ztoolkit = { log: () => undefined };
+    invalidatePaperSearchCache(1);
+    selectedPaperContextCache.delete(itemId);
+
+    try {
+      const controller = createPaperPickerController({
+        body: body as unknown as Element,
+        panelRoot: body as unknown as HTMLElement,
+        inputBox,
+        paperPicker: picker as unknown as HTMLDivElement,
+        paperPickerList: list as unknown as HTMLDivElement,
+        getItem: () => ({ id: itemId }) as Zotero.Item,
+        getCurrentLibraryID: () => 1,
+        isWebChatMode: () => false,
+        resolveAutoLoadedPaperContext: () => null,
+        getManualPaperContextsForItem: () =>
+          selectedPaperContextCache.get(itemId) || [],
+        isPaperContextMineru: () => false,
+        getTextContextConversationKey: () => null,
+        persistDraftInputForCurrentConversation: () => undefined,
+        updatePaperPreviewPreservingScroll: () => undefined,
+        updateSelectedTextPreviewPreservingScroll: () => undefined,
+        setStatusMessage: () => undefined,
+        log: () => undefined,
+      });
+      const clickBatch = (buttonIndex: number) => {
+        const bulkBar = list.children[0].children[1];
+        assert.include(bulkBar.className, "llm-paper-picker-bulk-bar");
+        bulkBar.children[buttonIndex].dispatchEvent({
+          type: "click",
+          preventDefault: () => undefined,
+          stopPropagation: () => undefined,
+        } as unknown as Event);
+      };
+      const assertResult = (index: number) => {
+        const rows = list.children[0].children[0];
+        assert.lengthOf(rows.children, 1);
+        assert.include(collectFakeText(rows), titles[index - 1]);
+        assert.notInclude(collectFakeText(rows), titles[2 - index]);
+        assert.equal(inputBox.value, `@${titles[index - 1]}`);
+      };
+
+      controller.schedulePaperPickerSearch();
+      await waitForPickerSearch();
+      assertResult(1);
+
+      // A batch on the old visible results must not clear the new debounce.
+      inputBox.value = "@NewResult";
+      inputBox.setSelectionRange(inputBox.value.length, inputBox.value.length);
+      controller.schedulePaperPickerSearch();
+      clickBatch(1);
+      await waitForPickerSearch();
+      assertResult(2);
+      assert.equal(
+        selectedPaperContextCache.get(itemId)?.[0].contextItemId,
+        attachments[0].id,
+      );
+
+      // Hold all three search branches so the batch runs after search starts.
+      const pendingSnapshot = new Promise<void>((resolve) => {
+        releaseSnapshot = resolve;
+      });
+      let markSearchStarted!: () => void;
+      const searchStarted = new Promise<void>((resolve) => {
+        markSearchStarted = resolve;
+      });
+      libraryIndexService.getSnapshot = async (...args) => {
+        markSearchStarted();
+        await pendingSnapshot;
+        return originalGetSnapshot.apply(libraryIndexService, args);
+      };
+      inputBox.value = "@OldResult";
+      inputBox.setSelectionRange(inputBox.value.length, inputBox.value.length);
+      controller.schedulePaperPickerSearch();
+      await searchStarted;
+      clickBatch(2);
+      releaseSnapshot!();
+      await waitForPickerSearch();
+      assertResult(1);
+    } finally {
+      releaseSnapshot?.();
+      libraryIndexService.getSnapshot = originalGetSnapshot;
+      selectedPaperContextCache.delete(itemId);
+      selectedPaperPreviewExpandedCache.delete(itemId);
+      paperContextModeOverrides.delete(itemId);
+      invalidatePaperSearchCache(1);
+      globalScope.Zotero = originalZotero;
+      globalScope.ztoolkit = originalToolkit;
+    }
+  });
+
   it("extracts manual and automatic Zotero tags for picker metadata", function () {
     const tagNames = getPaperSearchItemTagNames({
       getTags: () => [
@@ -468,7 +591,7 @@ describe("paper picker controller", function () {
         inputBox: {} as HTMLTextAreaElement,
         paperPicker: null,
         paperPickerList: null,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -567,7 +690,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -672,7 +795,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -787,7 +910,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -901,7 +1024,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -1032,7 +1155,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -1152,7 +1275,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -1269,7 +1392,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -1422,7 +1545,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker: paperPicker as unknown as HTMLDivElement,
         paperPickerList: paperPickerList as unknown as HTMLDivElement,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -1524,7 +1647,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,
@@ -1656,7 +1779,7 @@ describe("paper picker controller", function () {
         inputBox,
         paperPicker,
         paperPickerList,
-        getItem: () => makeOwnerItem(itemId),
+        getItem: () => ({ id: itemId }) as Zotero.Item,
         getCurrentLibraryID: () => 1,
         isWebChatMode: () => false,
         resolveAutoLoadedPaperContext: () => null,

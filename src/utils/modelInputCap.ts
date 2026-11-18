@@ -6,6 +6,8 @@
  * failures before sending requests.
  */
 
+import type { ChatFileAttachment } from "../shared/llm";
+
 import { DEFAULT_INPUT_TOKEN_CAP } from "./llmDefaults";
 import {
   normalizeInputTokenCap,
@@ -47,6 +49,7 @@ export type InputCapMessageContent = string | (TextPart | ImagePart)[];
 export type InputCapMessage = {
   role: "user" | "assistant" | "system";
   content: InputCapMessageContent;
+  fileAttachments?: ChatFileAttachment[];
 };
 
 export type ContextEstimateMessageContent =
@@ -127,6 +130,11 @@ function cloneMessages(messages: InputCapMessage[]): InputCapMessage[] {
   return messages.map((message) => ({
     role: message.role,
     content: cloneMessageContent(message.content),
+    ...(message.fileAttachments
+      ? {
+          fileAttachments: message.fileAttachments.map((file) => ({ ...file })),
+        }
+      : {}),
   }));
 }
 
@@ -398,13 +406,37 @@ export function estimateWirePayloadTokens(value: unknown): number {
   return 0;
 }
 
+function estimateCapMessageTokens(message: InputCapMessage): number {
+  return (
+    MESSAGE_OVERHEAD_ESTIMATED_TOKENS + estimateContentTokens(message.content)
+  );
+}
+
+function sumTokens(values: number[]): number {
+  let total = 0;
+  for (const value of values) total += value;
+  return total;
+}
+
+/** Re-estimate one message in place and return the adjusted running total. */
+function replaceMessageTokens(
+  messageTokens: number[],
+  index: number,
+  message: InputCapMessage,
+  total: number,
+): number {
+  const next = estimateCapMessageTokens(message);
+  const adjusted = total - messageTokens[index] + next;
+  messageTokens[index] = next;
+  return adjusted;
+}
+
 export function estimateConversationTokens(
   messages: InputCapMessage[],
 ): number {
   let total = 0;
   for (const message of messages) {
-    total += MESSAGE_OVERHEAD_ESTIMATED_TOKENS;
-    total += estimateContentTokens(message.content);
+    total += estimateCapMessageTokens(message);
   }
   return total;
 }
@@ -543,7 +575,12 @@ export function applyModelInputTokenCap(
     Math.floor(limitTokens * TOKEN_SAFETY_RATIO),
   );
   let working = cloneMessages(messages);
-  const estimatedBeforeTokens = estimateConversationTokens(working);
+  // Per-message estimates, kept parallel to `working`. The conversation
+  // estimate is a plain sum of these, so dropping or re-trimming one message
+  // only changes its own entry: the running total stays exactly equal to
+  // estimateConversationTokens(working) without re-walking every message.
+  let messageTokens = working.map(estimateCapMessageTokens);
+  const estimatedBeforeTokens = sumTokens(messageTokens);
   let estimatedAfterTokens = estimatedBeforeTokens;
   const effects: InputCapEffects = {
     documentContextTrimmed: false,
@@ -576,11 +613,11 @@ export function applyModelInputTokenCap(
       continue;
     }
     working.splice(i, 1);
+    estimatedAfterTokens -= messageTokens.splice(i, 1)[0];
     effects.historyDropped = true;
     if (lastUserIndex >= 0 && i < lastUserIndex) {
       lastUserIndex -= 1;
     }
-    estimatedAfterTokens = estimateConversationTokens(working);
   }
 
   let contextTrimGuard = 0;
@@ -592,14 +629,20 @@ export function applyModelInputTokenCap(
     const changed = trimContextMessage(working[contextIndex], overflow);
     if (!changed) {
       working.splice(contextIndex, 1);
+      estimatedAfterTokens -= messageTokens.splice(contextIndex, 1)[0];
       effects.documentContextDropped = true;
       if (lastUserIndex >= 0 && contextIndex < lastUserIndex) {
         lastUserIndex -= 1;
       }
     } else {
       effects.documentContextTrimmed = true;
+      estimatedAfterTokens = replaceMessageTokens(
+        messageTokens,
+        contextIndex,
+        working[contextIndex],
+        estimatedAfterTokens,
+      );
     }
-    estimatedAfterTokens = estimateConversationTokens(working);
   }
 
   let userTrimGuard = 0;
@@ -613,7 +656,12 @@ export function applyModelInputTokenCap(
     const changed = trimUserMessage(working[lastUserIndex], overflow);
     if (!changed) break;
     effects.promptTrimmed = true;
-    estimatedAfterTokens = estimateConversationTokens(working);
+    estimatedAfterTokens = replaceMessageTokens(
+      messageTokens,
+      lastUserIndex,
+      working[lastUserIndex],
+      estimatedAfterTokens,
+    );
   }
 
   if (estimatedAfterTokens > softLimitTokens) {
@@ -622,7 +670,8 @@ export function applyModelInputTokenCap(
       effects.historyDropped = true;
     }
     working = buildFallbackMessages(working, lastUserIndex);
-    estimatedAfterTokens = estimateConversationTokens(working);
+    messageTokens = working.map(estimateCapMessageTokens);
+    estimatedAfterTokens = sumTokens(messageTokens);
     const fallbackUserIndex = findLastUserIndex(working);
     let fallbackGuard = 0;
     while (
@@ -635,7 +684,12 @@ export function applyModelInputTokenCap(
       const changed = trimUserMessage(working[fallbackUserIndex], overflow);
       if (!changed) break;
       effects.promptTrimmed = true;
-      estimatedAfterTokens = estimateConversationTokens(working);
+      estimatedAfterTokens = replaceMessageTokens(
+        messageTokens,
+        fallbackUserIndex,
+        working[fallbackUserIndex],
+        estimatedAfterTokens,
+      );
     }
   }
 
@@ -650,3 +704,13 @@ export function applyModelInputTokenCap(
     effects,
   };
 }
+
+/** Private steps of applyModelInputTokenCap, exposed only for parity tests. */
+export const modelInputCapInternalsForTests = {
+  cloneMessages,
+  findLastUserIndex,
+  findContextMessageIndex,
+  trimContextMessage,
+  trimUserMessage,
+  buildFallbackMessages,
+};

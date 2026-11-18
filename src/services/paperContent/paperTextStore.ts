@@ -4,7 +4,7 @@
  * Backed by the existing `pdfTextCache` and `pdfTextLoadingTasks` instances,
  * so code (and tests) that seed those maps directly keep working. Extraction
  * itself stays in `pdfContext.ts`: `load` and `loadNote` take the extractor,
- * which fills the entry through `write`.
+ * which fills the entry through its load-owned writer.
  *
  * Reading and dropping text have distinct rules, so each rule is its own
  * named operation:
@@ -32,18 +32,72 @@ export type PaperTextLoadOptions = {
   preferFulltextCache?: boolean;
   /** Background index loads: fill the cache without firing the write-through hook. */
   silentLoad?: boolean;
+  /** Explicit borrow owner; silence alone does not grant eviction rights. */
+  borrowedBy?: () => void;
 };
 
-/** Extracts one item's text and stores it with `paperTextStore.write`. */
+/** A load-owned writer ignores results after its task was invalidated. */
+export type PaperTextWriter = (context: PdfContext) => void;
+
+/** Extracts one item's text and commits it through the supplied writer. */
 export type PaperTextExtractor = (
   item: Zotero.Item,
-  options?: PaperTextLoadOptions,
+  options: PaperTextLoadOptions | undefined,
+  write: PaperTextWriter,
 ) => Promise<void>;
 
 export function sourceTypeForTextAttachment(
   mode: TextAttachmentSourceMode,
 ): PdfContext["sourceType"] {
   return `attachment-${mode}` as PdfContext["sourceType"];
+}
+
+let cacheGeneration = 0;
+
+type TextBorrow = {
+  itemId: number;
+  generation: number;
+  released: boolean;
+  loads: Set<TextLoadOwner>;
+};
+
+type TextLoadOwner = {
+  itemId: number;
+  generation: number;
+  borrowers: Set<TextBorrow>;
+  adopted: boolean;
+  context?: PdfContext;
+};
+
+// Weak keys follow the existing task and cache-object lifetime, not item IDs.
+const borrows = new WeakMap<() => void, TextBorrow>();
+const taskOwners = new WeakMap<Promise<void>, TextLoadOwner>();
+const entryOwners = new WeakMap<PdfContext, TextLoadOwner>();
+// External adoption can precede the first load-owned publication of an object.
+const adoptedContexts = new WeakSet<PdfContext>();
+
+function useLoad(owner: TextLoadOwner | undefined, borrow?: TextBorrow): void {
+  if (!owner) return; // An externally seeded entry is never borrow-owned.
+  if (borrow) {
+    owner.borrowers.add(borrow);
+    borrow.loads.add(owner);
+  } else {
+    owner.adopted = true;
+  }
+}
+
+function releaseUnusedText(owner: TextLoadOwner): void {
+  const context = owner.context;
+  if (
+    !owner.adopted &&
+    owner.borrowers.size === 0 &&
+    owner.generation === cacheGeneration &&
+    context &&
+    entryOwners.get(context) === owner &&
+    pdfTextCache.get(owner.itemId) === context
+  ) {
+    pdfTextCache.delete(owner.itemId);
+  }
 }
 
 function cachedContextMatchesSourceMode(
@@ -86,62 +140,89 @@ async function load(
   options: PaperTextLoadOptions | undefined,
   extract: PaperTextExtractor,
 ): Promise<void> {
-  const cached = pdfTextCache.get(item.id);
-  if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
-    return;
-  }
-  if (cached) {
-    dropMismatchedEntry(item.id);
-  }
-  const existingTask = pdfTextLoadingTasks.get(item.id);
-  if (existingTask) {
-    await existingTask;
-    const latest = pdfTextCache.get(item.id);
-    if (latest && cachedContextMatchesSourceMode(latest, options?.sourceMode)) {
+  while (true) {
+    const borrowToken = options?.borrowedBy;
+    const borrow = borrowToken ? borrows.get(borrowToken) : undefined;
+    if (borrowToken !== undefined) {
+      // A cleared generation still rejects, even if its borrower also released.
+      if (borrow && borrow.generation !== cacheGeneration) {
+        throw new Error(`Paper text load cleared for item ${item.id}`);
+      }
+      // A released/invalid background caller is not a foreground adopter. This
+      // also stops a woken joiner or invalidated task from starting a new load.
+      if (!borrow || borrow.released || borrow.itemId !== item.id) return;
+    }
+    const cached = pdfTextCache.get(item.id);
+    if (cached && cachedContextMatchesSourceMode(cached, options?.sourceMode)) {
+      useLoad(entryOwners.get(cached), borrow);
       return;
     }
-    if (latest) {
-      dropMismatchedEntry(item.id);
+    const existingTask = pdfTextLoadingTasks.get(item.id);
+    if (existingTask) {
+      // Adopt before awaiting: a foreground waiter can join a silent index load.
+      useLoad(taskOwners.get(existingTask), borrow);
+      await existingTask;
+      // Another waiter may already have started the next source-mode load.
+      continue;
     }
-  }
-  if (pdfTextCache.has(item.id)) {
-    return;
-  }
-  const task = (async () => {
-    try {
-      await extract(item, options);
-      // Fresh loads with text only; cache hits and waits on an existing task return before this.
-      const loaded = pdfTextCache.get(item.id);
-      if (loaded && loaded.chunks.length && !options?.silentLoad) {
-        notifyPdfContextLoaded(item.id);
+    if (cached) dropMismatchedEntry(item.id);
+
+    // Defer extraction until ownership is installed, including synchronous
+    // extractors. Invalidation revokes this writer without cancelling its I/O.
+    const generation = cacheGeneration;
+    const owner: TextLoadOwner = {
+      itemId: item.id,
+      generation,
+      borrowers: new Set(),
+      adopted: false,
+    };
+    useLoad(owner, borrow);
+    const task: Promise<void> = Promise.resolve().then(async () => {
+      try {
+        await extract(item, options, (context) => {
+          if (pdfTextLoadingTasks.get(item.id) === task) {
+            // A shared object that was already adopted must stay adopted.
+            const previousOwner = entryOwners.get(context);
+            if (previousOwner?.adopted || adoptedContexts.has(context)) {
+              owner.adopted = true;
+            }
+            owner.context = context;
+            entryOwners.set(context, owner);
+            pdfTextCache.set(item.id, context);
+          }
+        });
+        if (pdfTextLoadingTasks.get(item.id) !== task) {
+          if (generation !== cacheGeneration) {
+            throw new Error(`Paper text load cleared for item ${item.id}`);
+          }
+          // A MinerU restore can invalidate its own extraction. Reload from
+          // the fresh source (or join its new owner), never publish old text.
+          return load(item, options, extract);
+        }
+        const loaded = pdfTextCache.get(item.id);
+        if (loaded && loaded.chunks.length && !options?.silentLoad) {
+          notifyPdfContextLoaded(item.id);
+        }
+      } finally {
+        if (pdfTextLoadingTasks.get(item.id) === task) {
+          pdfTextLoadingTasks.delete(item.id);
+        }
+        releaseUnusedText(owner);
       }
-    } finally {
-      pdfTextLoadingTasks.delete(item.id);
-    }
-  })();
-  pdfTextLoadingTasks.set(item.id, task);
-  await task;
+    });
+    taskOwners.set(task, owner);
+    pdfTextLoadingTasks.set(item.id, task);
+    return task;
+  }
 }
 
 async function loadNote(
   item: Zotero.Item,
-  extract: (item: Zotero.Item) => Promise<void>,
+  extract: (item: Zotero.Item, write: PaperTextWriter) => Promise<void>,
 ): Promise<void> {
-  if (pdfTextCache.has(item.id)) return;
-  const existingTask = pdfTextLoadingTasks.get(item.id);
-  if (existingTask) {
-    await existingTask;
-    return;
-  }
-  const task = (async () => {
-    try {
-      await extract(item);
-    } finally {
-      pdfTextLoadingTasks.delete(item.id);
-    }
-  })();
-  pdfTextLoadingTasks.set(item.id, task);
-  await task;
+  return load(item, { silentLoad: true }, (note, _options, write) =>
+    extract(note, write),
+  );
 }
 
 function invalidate(itemId: number): void {
@@ -182,10 +263,23 @@ function discardEmptyEntry(itemId: number): void {
 }
 
 function borrow(itemId: number): () => void {
-  const hadEntry = pdfTextCache.has(itemId);
-  return () => {
-    if (!hadEntry) pdfTextCache.delete(itemId);
+  const state: TextBorrow = {
+    itemId,
+    generation: cacheGeneration,
+    released: false,
+    loads: new Set(),
   };
+  const release = () => {
+    if (state.released) return;
+    state.released = true;
+    for (const owner of state.loads) {
+      owner.borrowers.delete(state);
+      releaseUnusedText(owner);
+    }
+    state.loads.clear();
+  };
+  borrows.set(release, state);
+  return release;
 }
 
 export const paperTextStore = {
@@ -200,8 +294,10 @@ export const paperTextStore = {
   isCachedOrLoading(itemId: number): boolean {
     return pdfTextCache.has(itemId) || pdfTextLoadingTasks.has(itemId);
   },
-  /** Stores an extractor's result. Only extractors call this. */
+  /** Direct seeding; asynchronous extractors use their load-owned writer. */
   write(itemId: number, context: PdfContext): void {
+    adoptedContexts.add(context);
+    useLoad(entryOwners.get(context));
     pdfTextCache.set(itemId, context);
   },
   forEach(fn: (context: PdfContext, itemId: number) => void): void {
@@ -233,13 +329,14 @@ export const paperTextStore = {
    */
   discardEmptyEntry,
   /**
-   * Marks the start of a load the caller may own. The returned release evicts
-   * the entry only when it was not cached at borrow time, so a paper that
-   * someone else loaded stays cached.
+   * Pass the returned release as load's `borrowedBy` option. Release is
+   * idempotent and evicts only that load's exact object, after its last
+   * borrower leaves, unless a non-borrowed load or write adopted it.
    */
   borrow,
   /** Drops every entry and every in-progress load (plugin shutdown). */
   clear(): void {
+    cacheGeneration += 1;
     pdfTextCache.clear();
     pdfTextLoadingTasks.clear();
   },

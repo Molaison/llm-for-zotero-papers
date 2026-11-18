@@ -9,7 +9,16 @@ import {
 } from "../src/agent/tools/control/taskUpdate";
 import { createNoteWriteTool } from "../src/agent/tools/write/noteWrite";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
+import { OPEN_PARTS_REASK_LIMIT } from "../src/agent/loop/turnBoundary";
+import { createLoadSkillTool } from "../src/agent/tools/read/loadSkill";
+import { skillGuidance } from "../src/agent/tools/guidance";
 import { PAPER_RECORD_PRIOR_TOKENS } from "../src/agent/loop/longJob";
+import { readStoredPaperDigests } from "../src/agent/context/paperDigests";
+import {
+  buildAgentSemanticCheckpoint,
+  readAgentTaskContext,
+} from "../src/agent/context/transcriptCompactor";
+import { estimateAgentPromptTokens } from "../src/agent/context/promptBudget";
 import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
 import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
 import {
@@ -19,7 +28,10 @@ import {
   replaceAgentTranscriptSegment,
 } from "../src/agent/store/transcriptStore";
 import { initAgentTraceStore } from "../src/agent/store/traceStore";
-import { listAgentToolResultHandles } from "../src/agent/store/toolResultHandles";
+import {
+  getAgentToolResultHandle,
+  listAgentToolResultHandles,
+} from "../src/agent/store/toolResultHandles";
 
 const estimatePrompt = (messages: AgentModelMessage[]) =>
   estimateContextMessagesTokens(messages);
@@ -93,6 +105,7 @@ type Turn = {
   quit?: true;
   events: AgentEvent[];
   prompts: AgentModelMessage[][];
+  promptTokens: number[];
   request?: AgentRuntimeRequest;
   /** Model requests the turn made. */
   requests: number;
@@ -341,9 +354,12 @@ async function runTurn(params: {
    * at once, as when the wait's bound has run out.
    */
   stoppedRunWaitMs?: number;
+  /** Registers tools beside the default ones. */
+  withTools?: (tools: AgentToolRegistry) => void;
 }): Promise<Turn> {
   const events: AgentEvent[] = [];
   const prompts: AgentModelMessage[][] = [];
+  const promptTokens: number[] = [];
   let request: AgentRuntimeRequest | undefined;
   let initialCheckpoint: ExecutionCheckpoint | undefined;
   let requests = 0;
@@ -363,7 +379,11 @@ async function runTurn(params: {
           },
         }
       : {}),
-    registry: registry(),
+    registry: (() => {
+      const tools = registry();
+      params.withTools?.(tools);
+      return tools;
+    })(),
     adapterFactory: (resolved) => ({
       getCapabilities: () => ({
         streaming: false,
@@ -377,6 +397,9 @@ async function runTurn(params: {
           initialCheckpoint = structuredClone(resolved.executionCheckpoint);
         // The session restarts and appends in place: keep each step's view.
         prompts.push([...stepParams.messages]);
+        promptTokens.push(
+          estimateAgentPromptTokens(stepParams.messages, stepParams.tools),
+        );
         const step = params.steps[requests];
         requests += 1;
         if (!step)
@@ -430,6 +453,7 @@ async function runTurn(params: {
     ...(quitDuring ? { quit: true as const } : {}),
     events,
     prompts,
+    promptTokens,
     request,
     requests,
     initialCheckpoint,
@@ -565,6 +589,11 @@ describe("outcome ledger in runtime turns", function () {
     });
 
     assert.equal(turn.requests, 2, "no correction: the answer is the part");
+    assert.equal(
+      turn.outcome?.kind === "completed" ? turn.outcome.text : "",
+      "Drift was measured as the change in place-field centres.",
+      "nothing open: the answer stands as written",
+    );
     const ledger = settled(turn);
     assert.deepEqual(ledger.end, { state: "completed" });
     assert.equal(outcome(ledger, "explain").status, "completed");
@@ -593,9 +622,14 @@ describe("outcome ledger in runtime turns", function () {
       [outcome(ledger, "save").status, outcome(ledger, "save").reason],
       ["skipped", OUTCOME_REASONS.notDone],
     );
+    // The answer says what the ledger records: the save was not done.
+    assert.equal(
+      turn.outcome?.kind === "completed" ? turn.outcome.text : "",
+      `Saved.\n\nNot done before this answer: \u201c${SAVE}\u201d 0 of 1 done.`,
+    );
   });
 
-  it("a skip claiming delivery is refused and the part stays open; the answer that follows delivers it, with no correction", async function () {
+  it("a skip claiming delivery is refused and the part stays open; an answer in chat does not deliver it, so the host asks for the document", async function () {
     const REVIEW = "Write the literature review";
     const turn = await runTurn({
       conversationKey,
@@ -623,11 +657,22 @@ describe("outcome ledger in runtime turns", function () {
           },
         }),
         finalStep("# Review\n\nThe papers agree on drift."),
+        finalStep("# Review\n\nThe papers agree on drift."),
+        finalStep("# Review\n\nThe papers agree on drift."),
+        finalStep("# Review\n\nThe papers agree on drift."),
       ],
     });
 
     assert.equal(turn.outcome?.kind, "completed");
-    assert.equal(turn.requests, 3, "the answer can deliver the review itself");
+    assert.equal(
+      turn.requests,
+      3 + OPEN_PARTS_REASK_LIMIT,
+      "each answer in chat is corrected, up to the limit",
+    );
+    assert.include(
+      promptText(turn.prompts[3]),
+      `“${REVIEW}” (deliver it with submit_document, or with note_write when the user asked for a saved note; an answer in chat does not complete it)`,
+    );
     const refusal = promptText(turn.prompts[2]);
     assert.include(
       refusal,
@@ -638,8 +683,58 @@ describe("outcome ledger in runtime turns", function () {
       "Produce it with the tools, or, if it truly cannot be done, list it under blocked with the concrete obstacle.",
     );
     const ledger = settled(turn);
-    assert.deepEqual(ledger.end, { state: "completed" });
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
+    assert.deepEqual(
+      [outcome(ledger, "review").status, outcome(ledger, "review").reason],
+      ["skipped", OUTCOME_REASONS.notDone],
+    );
+  });
+
+  it("an artifact part answered in chat is corrected once, then delivered by submit_document", async function () {
+    const REVIEW = "Write the literature review";
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Write a literature review of these papers",
+      steps: [
+        stepOf(
+          declare("declare-1", [
+            {
+              taskId: "review",
+              description: REVIEW,
+              expectedEffect: "artifact",
+            },
+          ]),
+        ),
+        finalStep("# Review\n\nThe papers agree on drift."),
+        stepOf({
+          id: "submit-1",
+          name: "submit_document",
+          arguments: {
+            taskId: "review",
+            documentKind: "literature_review",
+            integrityPolicy: "authored",
+            title: "Review",
+            markdown: "# Review\n\nThe papers agree on drift.",
+            citations: [],
+            quotes: [],
+            assets: [],
+            groundingReviewed: "passed",
+            groundingIssues: [],
+          },
+        }),
+      ],
+    });
+
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    assert.equal(turn.requests, 3, "one correction, then the document");
+    assert.include(
+      promptText(turn.prompts[2]),
+      `“${REVIEW}” (deliver it with submit_document, or with note_write when the user asked for a saved note; an answer in chat does not complete it)`,
+    );
+    const ledger = settled(turn);
     assert.equal(outcome(ledger, "review").status, "completed");
+    assert.lengthOf(outcome(ledger, "review").materialRefs, 1);
+    assert.deepEqual(ledger.end, { state: "completed" });
   });
 
   it("a skip of a save with a delivery-worded reason is accepted, as a write is not content", async function () {
@@ -929,7 +1024,7 @@ describe("outcome ledger in runtime turns", function () {
     assert.deepEqual(ledger.tasks[0].verifiedReceiptIds, []);
   });
 
-  it("a write the user declines ends the run blocked", async function () {
+  it("a write the user declines settles as skipped when the run completes", async function () {
     const turn = await runTurn({
       conversationKey,
       userText: "Summarize this paper and save it as a note",
@@ -944,9 +1039,11 @@ describe("outcome ledger in runtime turns", function () {
     assert.equal(turn.requests, 3);
     assert.equal(environment.library.nativeSaves(), 0);
     const ledger = settled(turn);
-    assert.deepEqual(ledger.end, { state: "blocked" });
+    // The decline is the user's own word: the part is skipped with that
+    // reason and does not hold the run in "Needs input".
+    assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
     const save = outcome(ledger, "save");
-    assert.equal(save.status, "blocked");
+    assert.equal(save.status, "skipped");
     assert.equal(save.reason, OUTCOME_REASONS.declined);
     assert.include(save.receiptIds, "declined:note-1");
   });
@@ -1417,7 +1514,116 @@ describe("long jobs in runtime turns", function () {
     return start!;
   }
 
+  it("[digest paging repair] includes the current tool schemas in page planning and digest room", async function () {
+    let tools: AgentToolRegistry;
+    const reader = pagedModel();
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read each paper in Drift and summarize each",
+      scope: {
+        wholeLibrary: false,
+        itemIds: PAPERS,
+        withText: PAPERS.length,
+        papers: Object.fromEntries(
+          PAPERS.map((id) => [
+            id,
+            { title: `Paper ${id}`, text: "pdf" as const },
+          ]),
+        ),
+      },
+      attached: { advanced: { inputTokenCap: 40_000 } },
+      withTools: (registry) => {
+        tools = registry;
+        registry.register({
+          spec: {
+            name: "schema_heavy_read",
+            description: "Read records with a large schema",
+            inputSchema: {
+              type: "object",
+              description: "Schema field documentation. ".repeat(160),
+            },
+            executionClass: "read",
+          },
+          validate: (args: unknown) => ({ ok: true, value: args }),
+          execute: async () => ({}),
+        });
+      },
+      steps: Array.from({ length: 50 }, () => reader),
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error));
+    const specs = tools!.listToolsForRequest(turn.request!);
+    const sized = pageEvents(turn).filter(
+      (page) => typeof page.page === "number",
+    );
+    assert.isAtLeast(sized.length, 2);
+    for (const page of sized) {
+      const prompt = pageStart(turn, page.page as number);
+      const sent = estimateAgentPromptTokens(prompt, specs);
+      assert.isAtMost(
+        Math.abs(sent - (page.promptTokens as number)),
+        200,
+        "page plan includes tool schemas",
+      );
+      if (page.digestShare) {
+        const base = prompt.filter(
+          (message) => !promptText([message]).startsWith("Long job"),
+        );
+        assert.isAtMost(
+          page.digestShare as number,
+          Math.floor(
+            ((page.budgetTokens as number) -
+              estimateAgentPromptTokens(base, specs)) /
+              (2 * PAPERS.length),
+          ),
+          "digest share reserves schema room",
+        );
+      }
+    }
+  });
+
   it("pages a 30-paper job in pages sized from the measured cost, and answers from every paper's digest", async function () {
+    // Real full reads return model digests and exact evidence, not passages.
+    scriptedPaperRead = (input) => {
+      const itemId = Number((input.target as { itemId?: number })?.itemId);
+      return {
+        mode: "full",
+        status: "complete",
+        papers: [
+          {
+            paperContext: {
+              itemId,
+              contextItemId: itemId + 1000,
+              libraryID: 1,
+              title: `Paper ${itemId}`,
+            },
+            paperKey: `1:${itemId + 1000}`,
+            documentFingerprint: `full-${itemId}`,
+            status: "complete",
+            processedChunks: 1,
+            totalChunks: 1,
+            missingChunkRanges: [],
+            digests: [
+              {
+                batchIndex: 0,
+                chunkIndexes: [0],
+                digest: `Finding ${itemId}: drift was measured. Digest conclusion ${itemId}.`,
+              },
+            ],
+            exactEvidence: [
+              {
+                paperKey: `1:${itemId + 1000}`,
+                paperTitle: `Paper ${itemId}`,
+                chunkIndex: 0,
+                text: paperText(itemId),
+                sectionLabel: "Results",
+                quoteCitationId: `Q${itemId}`,
+              },
+            ],
+            warnings: [],
+          },
+        ],
+      };
+    };
     const model = pagedModel();
     const turn = await runTurn({
       conversationKey,
@@ -1496,7 +1702,10 @@ describe("long jobs in runtime turns", function () {
         JSON.stringify(page),
       );
       assert.isBelow(R, page.budgetTokens as number);
-      const sent = estimatePrompt(pageStart(turn, page.page as number));
+      const sent =
+        turn.promptTokens[
+          turn.prompts.indexOf(pageStart(turn, page.page as number))
+        ];
       assert.isAtMost(
         Math.abs(sent - R),
         200,
@@ -1535,8 +1744,9 @@ describe("long jobs in runtime turns", function () {
     for (const itemId of PAPERS) {
       assert.include(finalPrompt, `itemId=${itemId}`);
       assert.include(finalPrompt, `Finding ${itemId}`);
+      assert.include(finalPrompt, `Digest conclusion ${itemId}`);
     }
-    assert.include(finalPrompt, "Results, p. 3");
+    assert.include(finalPrompt, "Model summary (not a verbatim quote)");
 
     // Each page's results are persisted with the transcript, each batch
     // with a handle: they outlive the turn, as after Stop or a restart.
@@ -1554,6 +1764,7 @@ describe("long jobs in runtime turns", function () {
     for (const itemId of PAPERS) {
       assert.include(recorded, `itemId=${itemId}`);
       assert.include(recorded, `Finding ${itemId}`);
+      assert.include(recorded, `Digest conclusion ${itemId}`);
     }
     const handles = records.map(
       (message) =>
@@ -1725,6 +1936,105 @@ describe("long jobs in runtime turns", function () {
     assert.isBelow(compactedAt, pageAt(2));
     return turn;
   }
+
+  it("keeps a skill loaded mid-turn, its tool guidance and the scope's item keys across the pager's restart (eval b4v6, run 2)", async function () {
+    const SKILL_BODY = "Drift review playbook: screen, digest, then write.";
+    const SKILL_GUIDANCE =
+      "Drift review tool rule: pass the review part's taskId to submit_document.";
+    const withSkill = (tools: AgentToolRegistry) => {
+      tools.register({
+        spec: {
+          name: "drift_helper",
+          description: "A tool whose guidance is tied to the drift skill",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+        },
+        guidance: [skillGuidance("drift-review", SKILL_GUIDANCE)],
+        validate: (args: unknown) => ({ ok: true, value: args as never }),
+        execute: async () => ({}),
+      } as never);
+      tools.register(
+        createLoadSkillTool({
+          getSkills: () => [
+            {
+              id: "drift-review",
+              description: "Review the drift literature",
+              version: 1,
+              contexts: ["paper-set"],
+              activation: "auto",
+              instruction: SKILL_BODY,
+              source: "system",
+            },
+          ],
+          getShippedInstruction: () => SKILL_BODY,
+          getToolDefinitions: (request) =>
+            tools.listToolDefinitionsForRequest(request),
+        }),
+      );
+    };
+    const paged = pagedModel();
+    let first = true;
+    const model: ScriptStep = (messages) => {
+      if (!first) return paged(messages);
+      first = false;
+      // Consume the paged model's declaration, then load the skill with it.
+      const declared = paged(messages) as AgentModelStep;
+      const calls = declared.kind === "tool_calls" ? [...declared.calls] : [];
+      return stepOf(
+        { id: "load-1", name: "load_skill", arguments: { id: "drift-review" } },
+        ...calls,
+      );
+    };
+    const turn = await runTurn({
+      conversationKey,
+      userText: "Read every paper in Drift and summarize each",
+      withTools: withSkill,
+      scope: {
+        wholeLibrary: false,
+        itemIds: PAPERS,
+        withText: PAPERS.length,
+        papers: Object.fromEntries(
+          PAPERS.map((itemId) => [
+            itemId,
+            {
+              title: `Paper ${itemId}`,
+              text: "pdf" as const,
+              itemKey: `KEY${itemId}`,
+            },
+          ]),
+        ),
+      },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+        advanced: { inputTokenCap: 30_000 },
+      },
+      steps: Array.from({ length: 40 }, () => model),
+    });
+
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
+    // The first load returned the skill and its guidance.
+    const loaded = promptText(pageStart(turn, 1));
+    assert.include(loaded, SKILL_BODY);
+    assert.include(loaded, SKILL_GUIDANCE);
+    // Page 2 starts from a restarted prompt: the load_skill result is gone
+    // from it, and the host carries the skill, its guidance and the keys.
+    const restarted = pageStart(turn, 2);
+    assert.notInclude(
+      restarted
+        .filter((message) => message.role === "tool")
+        .map((message) => promptText([message]))
+        .join("\n"),
+      SKILL_BODY,
+      "the restart dropped the load_skill result itself",
+    );
+    const text = promptText(restarted);
+    assert.include(text, SKILL_BODY);
+    assert.include(text, SKILL_GUIDANCE);
+    assert.include(text, "2001=KEY2001");
+    assert.include(text, "2030=KEY2030");
+  });
 
   it("measures a page again from a prompt the budget compacted under it: later reads get a real share, and no paper's digest is empty", async function () {
     const turn = await compactedMidPage({
@@ -2109,7 +2419,14 @@ describe("resuming a long job in runtime turns", function () {
     selectedCollectionContexts: [
       { collectionId: 9, name: "Drift", libraryID: 1 },
     ],
-    advanced: { inputTokenCap: 30_000 },
+    // 30,500 since 2026-10-20: the fixed prompt grew with the search-routing
+    // contract; 30,700 since 2026-10-25, for the preview color sentence;
+    // 30,800 since 2026-10-30, for the load-a-skill-first line of a folder
+    // scope; 31,000 since 2026-10-31, for the user-instructions-first
+    // clauses (a digest's read limit, the skill deciding only what the
+    // request leaves open). These tests check long-job resume, not prompt
+    // size.
+    advanced: { inputTokenCap: 31_000 },
   } as Partial<AgentRuntimeRequestInput>;
 
   beforeEach(async function () {
@@ -2165,7 +2482,149 @@ describe("resuming a long job in runtime turns", function () {
     },
   });
 
-  it("goes on after Stop from the first paper not settled, and its last step sees every paper's results", async function () {
+  it("[digest paging repair] derives an ordinary new task only from its current user request, not a completed execution's checkpoint", async function () {
+    const oldGoal =
+      "An old task: discuss only imaging methods and use an old format.";
+    const old = await runTurn({
+      conversationKey,
+      userText: oldGoal,
+      steps: [finalStep("The old task is complete.")],
+    });
+    assert.equal(old.outcome?.kind, "completed");
+    const stored = await loadAgentTranscriptSegment({
+      conversationKey,
+      compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+    });
+    const { checkpoint } = buildAgentSemanticCheckpoint({
+      messages: stored.messages,
+      summaryTokens: 3_000,
+    });
+    await replaceAgentTranscriptSegment({ ...stored, messages: [checkpoint] });
+    const newGoal =
+      "Read this paper for a different task and summarize its limitations.";
+    let toolContext: AgentRuntimeRequest | undefined;
+    const originalRead = scriptedPaperRead!;
+    scriptedPaperRead = (input, context) => {
+      toolContext = context.request;
+      return originalRead(input, context);
+    };
+    const turn = await runTurn({
+      conversationKey,
+      userText: newGoal,
+      steps: [
+        stepOf(readCall(PAPERS[0])),
+        finalStep("Here are the limitations."),
+      ],
+    });
+    assert.equal(turn.outcome?.kind, "completed", String(turn.error));
+    assert.exists(toolContext, "the new task reaches the actual read tool");
+    assert.equal(toolContext!.userText, newGoal);
+    assert.include(toolContext!.taskContext!, newGoal);
+    assert.notInclude(toolContext!.taskContext!, oldGoal);
+    assert.notExists(
+      turn.initialCheckpoint,
+      "the ordinary new task adopts no old execution ledger",
+    );
+  });
+
+  it("[digest paging repair] goes on after Stop with canonical summaries and evidence intact, while its last step sees budgeted results", async function () {
+    const oldGoal =
+      "Task A, already complete: only discuss imaging methods in the old format.";
+    const old = await runTurn({
+      conversationKey,
+      userText: oldGoal,
+      steps: [finalStep("Task A is complete.")],
+    });
+    assert.equal(old.outcome?.kind, "completed");
+    const oldExecutionId = old.request!.executionContext!.executionId;
+    const oldStored = await loadAgentTranscriptSegment({
+      conversationKey,
+      compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+    });
+    const oldCheckpoint = buildAgentSemanticCheckpoint({
+      messages: oldStored.messages,
+      summaryTokens: 3_000,
+    }).checkpoint;
+    await replaceAgentTranscriptSegment({
+      ...oldStored,
+      messages: [oldCheckpoint],
+    });
+    const userGoal = (
+      "Read every paper in Drift and summarize each.\n" +
+      "Keep the method, conclusion, limitations and citation for every paper.\n".repeat(
+        64,
+      )
+    ).trim();
+    const readContexts: Array<{ userText: string; taskContext?: string }> = [];
+    const summary =
+      "Finding 5001: opening observation. " +
+      "Intermediate observations. ".repeat(220) +
+      "Final conclusion: the effect reverses.";
+    const source = "Full exact evidence. ".repeat(120);
+    const originalRead = scriptedPaperRead!;
+    scriptedPaperRead = (input, context) => {
+      readContexts.push({
+        userText: context.request.userText,
+        taskContext: context.request.taskContext,
+      });
+      const itemId = Number((input.target as { itemId?: number })?.itemId);
+      if (itemId !== PAPERS[0]) return originalRead(input, context);
+      return {
+        mode: "full",
+        status: "complete",
+        papers: [
+          {
+            paperContext: {
+              itemId,
+              title: `Paper ${itemId}`,
+              contextItemId: itemId + 1000,
+              libraryID: 1,
+            },
+            status: "complete",
+            processedChunks: 1,
+            totalChunks: 1,
+            missingChunkRanges: [],
+            digests: [{ digest: summary }],
+            exactEvidence: [
+              {
+                text: source,
+                sectionLabel: "Results",
+                quoteCitationId: "Q5001",
+              },
+            ],
+          },
+        ],
+      };
+    };
+    const assertCanonical = async () => {
+      const records = await listAgentToolResultHandles({
+        conversationKey,
+        toolName: "long_job_results",
+      });
+      const digests = records.flatMap((record) =>
+        readStoredPaperDigests(
+          (record.content as { digests?: unknown }).digests,
+        ),
+      );
+      const first = digests.filter((digest) => digest.itemId === PAPERS[0]);
+      assert.isNotEmpty(first);
+      for (const digest of first) {
+        assert.deepEqual(
+          digest.excerpts.map((excerpt) => excerpt.text),
+          [summary, source.trim()],
+        );
+        assert.notProperty(digest, "omitted");
+        assert.equal(digest.excerpts[1].quoteId, "Q5001");
+        assert.isNotEmpty(digest.handles);
+        for (const handle of digest.handles) {
+          const original = await getAgentToolResultHandle({
+            conversationKey,
+            handle,
+          });
+          assert.exists(original, "the original read handle still resolves");
+        }
+      }
+    };
     // The first turn reads each page the host names, and the user stops it
     // after a dozen papers.
     const controller = new AbortController();
@@ -2198,14 +2657,26 @@ describe("resuming a long job in runtime turns", function () {
     };
     const stopped = await runTurn({
       conversationKey,
-      userText: "Read every paper in Drift and summarize each",
+      userText: userGoal,
       scope,
       attached,
       signal: controller.signal,
       steps: Array.from({ length: 20 }, () => reader),
     });
-    assert.equal(stopStatus(stopped), "cancelled");
+    assert.equal(
+      stopStatus(stopped),
+      "cancelled",
+      JSON.stringify({
+        outcome: stopped.outcome,
+        error: String(stopped.error),
+      }),
+    );
     const before = settled(stopped);
+    assert.notEqual(
+      before.executionId,
+      oldExecutionId,
+      "B is not A's execution",
+    );
     assert.deepEqual(before.end, { state: "cancelled" });
     const doneBefore = outcome(before, "read-all").doneTargets || [];
     assert.isAtLeast(doneBefore.length, 12);
@@ -2213,6 +2684,15 @@ describe("resuming a long job in runtime turns", function () {
     const left = PAPERS.filter(
       (itemId) => !doneBefore.includes(`item:${itemId}`),
     );
+    await assertCanonical();
+    assert.isNotEmpty(readContexts);
+    assert.isTrue(
+      readContexts.every((context) => context.userText === userGoal),
+    );
+    assert.isTrue(
+      readContexts.every((context) => context.taskContext?.includes(userGoal)),
+    );
+    await restartZotero();
 
     // "continue": the stopped ledger is picked back up, with the papers
     // left; the model works from the resume note, then from the pages.
@@ -2242,6 +2722,71 @@ describe("resuming a long job in runtime turns", function () {
       steps: Array.from({ length: 30 }, () => resumer),
     });
     assert.equal(resumed.outcome?.kind, "completed", String(resumed.error));
+    const continuedReads = readContexts.filter(
+      (context) => context.userText === "continue",
+    );
+    assert.isNotEmpty(continuedReads, "Continue reached the actual paper tool");
+    for (const context of continuedReads) {
+      assert.include(
+        context.taskContext!,
+        userGoal,
+        "the original full goal reaches the reader",
+      );
+      assert.include(
+        context.taskContext!,
+        "Subsequent user instruction 1:\ncontinue",
+      );
+      assert.include(
+        context.taskContext!,
+        "historical, read-only, not new authorization",
+      );
+      assert.notInclude(
+        context.taskContext!,
+        oldGoal,
+        "B's continued tool must not inherit completed A",
+      );
+    }
+    assert.equal(
+      resumed.request!.userText,
+      "continue",
+      "current-turn identity is unchanged",
+    );
+    for (const prompt of resumed.prompts) {
+      assert.include(
+        readAgentTaskContext(prompt, before.executionId) || "",
+        userGoal,
+        "every rebuilt main prompt retains the complete user root",
+      );
+      assert.notInclude(
+        readAgentTaskContext(prompt, before.executionId) || "",
+        oldGoal,
+      );
+    }
+    const allowances = [...stopped.events, ...resumed.events].flatMap(
+      (event) =>
+        event.type === "provider_event" &&
+        event.providerType === "agent_context_budget" &&
+        event.payload?.action === "semantic_checkpoint_allowance"
+          ? [event.payload]
+          : [],
+    );
+    assert.isNotEmpty(
+      allowances,
+      "real runtime checkpoint allowances were measured",
+    );
+    for (const allowance of allowances) {
+      assert.equal(
+        allowance.summaryTokens,
+        2_480,
+        "the existing 31,000-window summary share is unchanged",
+      );
+      assert.isAbove(allowance.maxTokens as number, 0);
+      assert.isBelow(
+        allowance.maxTokens as number,
+        allowance.budgetTokens as number,
+        "fixed envelope and tools were subtracted",
+      );
+    }
     const adopted = resumed.initialCheckpoint;
     assert.exists(adopted, "the stopped ledger was picked back up");
     assert.equal(adopted!.executionId, before.executionId);
@@ -2263,12 +2808,38 @@ describe("resuming a long job in runtime turns", function () {
     const last = promptText(resumed.prompts[resumed.prompts.length - 1]);
     assert.include(last, "Long job complete");
     for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
+    assert.include(last, "Final conclusion: the effect reverses.");
+    assert.include(last, "non-verbatim");
+    assert.notInclude(
+      last,
+      summary,
+      "the canonical summary is not put in the prompt unbounded",
+    );
+    await assertCanonical();
     // Each paper's results are recorded once: a carried paper is not
     // recorded again by the turn that resumed the job.
     const stored = await loadAgentTranscriptSegment({
       conversationKey,
       compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
     });
+    const durableRequests = stored.messages.filter(
+      (message) =>
+        message.role === "user" &&
+        (message.content === `User request:\n${userGoal}` ||
+          message.content === "User request:\ncontinue"),
+    );
+    assert.lengthOf(
+      durableRequests,
+      2,
+      "B and Continue have durable user entries",
+    );
+    for (const message of durableRequests) {
+      assert.equal(
+        (message as { executionId?: string }).executionId,
+        before.executionId,
+        "portable storage preserves the adopted execution id",
+      );
+    }
     const recorded = stored.messages
       .filter(
         (message) =>
@@ -2381,6 +2952,26 @@ describe("resuming a long job in runtime turns", function () {
         .join("\n");
       for (const itemId of read)
         assert.include(records, `Finding ${itemId}`, `paper ${itemId}`);
+      const stoppedBatches = await listAgentToolResultHandles({
+        conversationKey,
+        toolName: "long_job_results",
+      });
+      const stoppedDigests = new Map(
+        stoppedBatches.flatMap((batch) =>
+          readStoredPaperDigests(
+            (batch.content as { digests?: unknown }).digests,
+          ).map((digest) => [digest.itemId, digest] as const),
+        ),
+      );
+      for (const itemId of unfinished) {
+        const digest = stoppedDigests.get(itemId)!;
+        assert.exists(digest, "the unfinished page has a canonical result");
+        assert.equal(
+          digest.excerpts[0].text,
+          `Finding ${itemId}: drift was measured in this paper. ${"Representational drift details. ".repeat(120)}`.trim(),
+        );
+        assert.notProperty(digest, "omitted");
+      }
 
       // "continue": a paper whose results the conversation holds is tagged
       // without being read again.
@@ -2421,12 +3012,92 @@ describe("resuming a long job in runtime turns", function () {
         attached,
         steps: Array.from({ length: 60 }, () => resumer),
       });
-      assert.equal(resumed.outcome?.kind, "completed", String(resumed.error));
+      assert.equal(
+        resumed.outcome?.kind,
+        "completed",
+        JSON.stringify({
+          outcome: resumed.outcome,
+          requests: resumed.requests,
+          causeStack: (resumed.outcome as { cause?: Error })?.cause?.stack,
+          budget: resumed.events
+            .filter(
+              (event) =>
+                event.type === "provider_event" &&
+                event.providerType === "agent_context_budget",
+            )
+            .at(-1),
+        }) || String(resumed.error),
+      );
       for (const itemId of unfinished)
         assert.notInclude(reread, itemId, `paper ${itemId} was read before`);
       const after = settled(resumed);
-      assert.deepEqual(after.end, { state: "completed" });
+      assert.deepEqual(
+        after.end,
+        { state: "completed" },
+        JSON.stringify(resumed.outcome),
+      );
       assert.lengthOf(outcome(after, "tag-all").doneTargets!, 30);
+      assert.isTrue(
+        resumed.events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_context_budget" &&
+            event.payload?.action === "compacted_model_prompt",
+        ),
+        "the resumed page was compacted between reading and tagging",
+      );
+      // Page evidence must outlive the provider's compacted view: recorded
+      // digests still name readable results, not just titles in a last prompt.
+      const batches = await listAgentToolResultHandles({
+        conversationKey,
+        toolName: "long_job_results",
+      });
+      const digests = new Map(
+        batches.flatMap((batch) => {
+          const content = batch.content as {
+            executionId?: string;
+            digests?: unknown;
+          };
+          return content.executionId === after.executionId
+            ? readStoredPaperDigests(content.digests).map(
+                (digest) => [digest.itemId, digest] as const,
+              )
+            : [];
+        }),
+      );
+      assert.sameMembers([...digests.keys()], PAPERS);
+      const recorded = promptText(
+        (
+          await loadAgentTranscriptSegment({
+            conversationKey,
+            compatibilityKey: PORTABLE_TRANSCRIPT_KEY,
+          })
+        ).messages,
+      );
+      for (const itemId of PAPERS) {
+        assert.include(
+          recorded,
+          `Finding ${itemId}`,
+          `recorded paper ${itemId}`,
+        );
+        const digest = digests.get(itemId)!;
+        assert.include(
+          digest.excerpts.map((excerpt) => excerpt.text).join("\n"),
+          `Finding ${itemId}`,
+          `stored results of paper ${itemId}`,
+        );
+        assert.isNotEmpty(digest.handles, `result handle for paper ${itemId}`);
+        const results = await Promise.all(
+          digest.handles.map((handle) =>
+            getAgentToolResultHandle({ conversationKey, handle }),
+          ),
+        );
+        assert.include(
+          JSON.stringify(results.map((result) => result?.content)),
+          `Finding ${itemId}`,
+          `stored read behind paper ${itemId}'s handle`,
+        );
+      }
       const last = promptText(resumed.prompts[resumed.prompts.length - 1]);
       for (const itemId of PAPERS) assert.include(last, `Finding ${itemId}`);
     } finally {
@@ -3701,7 +4372,120 @@ describe("a digest part in runtime turns", function () {
     assert.deepEqual(ledger.end, { state: "completed_with_exceptions" });
   });
 
-  it("a prose review over the digests, with no citation markup, completes the review part whole, with no correction", async function () {
+  it("an answer citing a digest quote's id publishes its citation; one citing an evidence ref publishes none", async function () {
+    const finalOf = (turn: Turn) => {
+      const final = turn.events.find((event) => event.type === "final");
+      assert.exists(final);
+      return final as Extract<AgentEvent, { type: "final" }>;
+    };
+    let quoteId = "";
+    let evidenceRef = "";
+    const cited = await runTurn({
+      conversationKey,
+      userText: "What do my papers say about drift?",
+      scope: { wholeLibrary: false, itemIds: [101, 102], withText: 2 },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+      },
+      steps: [
+        stepOf(
+          declare("declare-digest", [
+            {
+              taskId: "summaries",
+              description: SUMMARIZE,
+              expectedEffect: "digest",
+              scope: true,
+            },
+          ]),
+        ),
+        (messages) => {
+          // The model reads each Evidence quote's id in the result.
+          const text = promptText(messages);
+          quoteId = /quoteCitationId: (Q_[a-z0-9]+)/.exec(text)?.[1] || "";
+          assert.match(quoteId, /^Q_/);
+          // The provider gets the id, never the citation record.
+          assert.notInclude(text, "quoteCitations");
+          return finalStep(
+            `Paper 101 recorded forty cells over ten days [[cite:${quoteId}]].`,
+          );
+        },
+      ],
+    });
+    assert.equal(cited.outcome?.kind, "completed", String(cited.error || ""));
+    const citations = finalOf(cited).quoteCitations || [];
+    assert.deepEqual(
+      citations.map((citation) => citation.id),
+      [quoteId],
+    );
+    assert.include(citations[0], {
+      quoteText: "We recorded forty cells over ten days.",
+      citationLabel: "(Paper 101, n.d.)",
+      itemId: 101,
+      contextItemId: 1101,
+    });
+
+    conversationKey += 1;
+    // The papers get Zotero identities, so the host issues the read
+    // observations whose evidence refs the digest names.
+    const zotero = (globalThis as unknown as { Zotero: any }).Zotero;
+    const items = zotero.Items;
+    zotero.Items = {
+      ...items,
+      get: (id: number) =>
+        id === 101 || id === 102
+          ? { id, key: `PAPER${id}`, libraryID: 1 }
+          : items.get(id),
+    };
+    const refCited = await runTurn({
+      conversationKey,
+      userText: "What do my papers say about drift?",
+      scope: { wholeLibrary: false, itemIds: [101, 102], withText: 2 },
+      attached: {
+        selectedCollectionContexts: [
+          { collectionId: 9, name: "Drift", libraryID: 1 },
+        ],
+      },
+      steps: [
+        stepOf(
+          declare("declare-digest", [
+            {
+              taskId: "summaries",
+              description: SUMMARIZE,
+              expectedEffect: "digest",
+              scope: true,
+            },
+          ]),
+        ),
+        (messages) => {
+          // The ref the digest's document source names, as the model read
+          // it.
+          const ref = /"evidenceRefs":\["([0-9a-f]{12}:\d+)"\]/.exec(
+            promptText(messages).replace(/\\"/g, '"'),
+          );
+          assert.exists(ref, "the digest result names its evidence ref");
+          evidenceRef = ref![1];
+          return finalStep(
+            `Paper 101 recorded forty cells over ten days [[cite:${evidenceRef}]].`,
+          );
+        },
+      ],
+    }).finally(() => {
+      zotero.Items = items;
+    });
+    assert.equal(
+      refCited.outcome?.kind,
+      "completed",
+      String(refCited.error || ""),
+    );
+    assert.isUndefined(
+      finalOf(refCited).quoteCitations,
+      "an evidence ref names a read, not a passage",
+    );
+  });
+
+  it("a prose review over the digests, written in chat, leaves the review part open and is corrected toward submit_document", async function () {
     const REVIEW = "Write the literature review";
     const turn = await runTurn({
       conversationKey,
@@ -3729,18 +4513,28 @@ describe("a digest part in runtime turns", function () {
             },
           ]),
         ),
-        finalStep(
-          "## Literature review\n\nPaper 101 and Paper 102 agree that drift is slow.",
+        ...Array.from({ length: OPEN_PARTS_REASK_LIMIT + 1 }, () =>
+          finalStep(
+            "## Literature review\n\nPaper 101 and Paper 102 agree that drift is slow.",
+          ),
         ),
       ],
     });
 
     assert.equal(turn.outcome?.kind, "completed", String(turn.error || ""));
-    assert.equal(turn.requests, 2, "no correction for the review part");
+    assert.equal(
+      turn.requests,
+      2 + OPEN_PARTS_REASK_LIMIT,
+      "the review part is corrected up to the limit",
+    );
+    assert.include(
+      promptText(turn.prompts[2]),
+      `“${REVIEW}” (deliver it with submit_document, or with note_write when the user asked for a saved note; an answer in chat does not complete it)`,
+    );
     const ledger = settled(turn);
     const review = outcome(ledger, "review");
-    assert.equal(review.status, "completed");
-    assert.notProperty(review, "exceptions", "not 0 of 3 covered");
+    assert.equal(review.status, "skipped");
+    assert.equal(review.reason, OUTCOME_REASONS.notDone);
     assert.equal(outcome(ledger, "summaries").status, "completed");
   });
 });

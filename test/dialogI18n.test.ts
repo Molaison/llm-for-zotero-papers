@@ -33,4 +33,14 @@ describe("shared dialog localization", function () {
 
     for (const value of strings) assert.notEqual(t(value), value, value);
   });
+
+  it("translates the selected-text card and Quote button hints", function () {
+    const strings = [
+      "Show all of the selected text",
+      "Show less of the selected text",
+      "Quote selected text",
+    ];
+
+    for (const value of strings) assert.notEqual(t(value), value, value);
+  });
 });

@@ -3,6 +3,7 @@ import { describe, it } from "mocha";
 
 import {
   beginChatRenderCycle,
+  beginOwnedChatRenderCycle,
   claimAsyncChatRender,
   claimDeferredChatRender,
   currentChatRenderCycle,
@@ -28,6 +29,32 @@ describe("chatRenderCycle", function () {
     const cycle = beginChatRenderCycle(body);
     assert.isTrue(claimAsyncChatRender(body, currentChatRenderCycle(body)));
     assert.isFalse(claimDeferredChatRender(body, cycle));
+  });
+
+  it("an in-place paper switch owns its cycle: neither lifecycle path renders", function () {
+    const body = fakeBody();
+    const cycle = beginOwnedChatRenderCycle(body);
+    setPanelRenderClaim(body, {
+      kind: "sync-rendered",
+      itemKey: "item-B",
+      cycle,
+    });
+    const claim = takePanelRenderClaim(body, "item-B");
+    assert.equal(claim.outcome, "sync-rendered");
+    assert.isFalse(
+      claimAsyncChatRender(
+        body,
+        claim.outcome === "sync-rendered" ? claim.cycle : null,
+      ),
+    );
+    assert.isFalse(claimDeferredChatRender(body, cycle));
+  });
+
+  it("a full render after an in-place switch renders again", function () {
+    const body = fakeBody();
+    beginOwnedChatRenderCycle(body);
+    const cycle = beginChatRenderCycle(body);
+    assert.isTrue(claimDeferredChatRender(body, cycle));
   });
 
   it("deferred path renders alone when onAsyncRender never fires", function () {

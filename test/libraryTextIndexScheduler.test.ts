@@ -13,6 +13,7 @@ import {
   INDEX_PRIORITY,
   INDEX_RETRY_BACKOFF_MS,
   INDEX_STOP_GRACE_MS,
+  INDEX_MAX_ATTEMPTS,
   INDEX_URGENT_ADD_BATCH_MAX,
 } from "../src/services/libraryTextIndex/constants";
 import {
@@ -325,6 +326,147 @@ describe("library text index scheduler", function () {
       [3, 1, 2],
     );
     assert.equal((await store.countQueue(1)).queued, 0);
+  });
+
+  it("re-posts a pre-stemming index while the user is active, after urgent jobs, and waitForIdle waits for it", async function () {
+    userIdle = false;
+    const text = "Readout errors grew with temperature.";
+    await store.upsertDocument(
+      docRow(7, {
+        chunks: [
+          {
+            chunkIndex: 0,
+            text,
+            tokenCount: 5,
+            meta: { chunkKind: "body" },
+            // Surface tokens, as a build before stemming wrote them.
+            tf: { readout: 1, errors: 1, grew: 1, temperature: 1 },
+          },
+        ],
+      }),
+    );
+    harness.exec(`DELETE FROM document_tokenizer`);
+    // The queue is empty, but the pending pass is runnable work.
+    let idle: boolean | null = null;
+    void scheduler.waitForIdle(60_000).then((value) => {
+      idle = value;
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.isNull(idle, "not idle while the pass is pending");
+    await scheduler.enqueue([3], "added");
+    scheduler.start();
+    clock += INDEX_DRAIN_GAP_BUSY_MS;
+    await runDueTimers();
+    assert.deepEqual(indexed, [{ id: 3, lane: "urgent" }], "urgent first");
+    assert.isNull(await store.getIndexMeta("tokenizer_version"));
+    assert.isNull(idle, "still not idle after the urgent job");
+    await drainAll(3);
+    assert.isTrue(idle, "idle once the pass is done");
+    assert.equal(await store.getIndexMeta("tokenizer_version"), "2");
+    const terms = harness
+      .rows(`SELECT term FROM postings WHERE attachment_id = 7`)
+      .map((row) => row.term);
+    assert.includeMembers(terms, ["error", "readout", "grew", "temperatur"]);
+    assert.notInclude(terms, "errors");
+    assert.deepEqual(indexed, [{ id: 3, lane: "urgent" }], "no PDF re-read");
+  });
+
+  it("re-posts a chunker-2 document without a PDF re-index, and still re-indexes other old chunker versions", async function () {
+    const chunk = (text: string) => ({
+      chunkIndex: 0,
+      text,
+      tokenCount: 3,
+      meta: { chunkKind: "body" },
+      tf: { errors: 1 }, // surface term, as an older build wrote it
+    });
+    await store.upsertDocument(
+      docRow(1, { chunkerVersion: 2, chunks: [chunk("Sensor errors grew.")] }),
+    );
+    await store.upsertDocument(docRow(2, { chunkerVersion: 1 }));
+    snapshotIds = [1, 2];
+    const result = await scheduler.reconcile(1);
+    assert.equal(result.stale, 1, "only the chunker-1 document is stale");
+    const queued = await store.dequeueNext({
+      now: clock,
+      minPriority: INDEX_PRIORITY.chunkerVersion,
+    });
+    assert.equal(queued?.attachmentId, 2);
+    assert.equal(queued?.reason, "chunkerVersion");
+    assert.equal((await store.countQueue(1)).queued, 1);
+    assert.equal((await scheduler.getStatus(1)).stale, 1);
+
+    scheduler.start();
+    await drainAll(4);
+    assert.deepEqual(
+      indexed.filter((i) => i.id === 1),
+      [],
+      "no PDF read for the chunker-2 document",
+    );
+    const versions = harness
+      .rows(
+        `SELECT attachment_id, chunker_version FROM documents ORDER BY attachment_id`,
+      )
+      .map((row) => [row.attachment_id, Number(row.chunker_version)]);
+    assert.deepEqual(versions[0], [1, LIBRARY_TEXT_INDEX_CHUNKER_VERSION]);
+    assert.include(
+      harness
+        .rows(`SELECT term FROM postings WHERE attachment_id = 1`)
+        .map((row) => row.term),
+      "error",
+    );
+  });
+
+  it("sets aside a document whose re-post keeps failing after the attempt cap, finishes the others, and never blocks the prefetch lane", async function () {
+    for (const id of [1, 2]) {
+      await store.upsertDocument(
+        docRow(id, {
+          chunks: [
+            {
+              chunkIndex: 0,
+              text: "Sensor errors grew.",
+              tokenCount: 3,
+              meta: { chunkKind: "body" },
+              tf: { errors: 1 },
+            },
+          ],
+        }),
+      );
+    }
+    harness.exec(`DELETE FROM document_tokenizer`);
+    const attempts: number[] = [];
+    const original = store.repostDocument.bind(store);
+    store.repostDocument = async (attachmentId, version, rebuild) => {
+      attempts.push(attachmentId);
+      if (attachmentId === 1) throw new Error("disk full");
+      return original(attachmentId, version, rebuild);
+    };
+    await scheduler.enqueue([3], "prefetch");
+    scheduler.start();
+    const warns = await captureWarns(async () => {
+      await drainAll(6);
+      assert.deepEqual(
+        indexed,
+        [{ id: 3, lane: "prefetch" }],
+        "the prefetch lane ran in the cycle of the failure",
+      );
+      for (let i = 0; i < 6; i += 1) {
+        clock += INDEX_RETRY_BACKOFF_MS[0];
+        await drainAll(3);
+      }
+    });
+    assert.equal(attempts.filter((id) => id === 1).length, INDEX_MAX_ATTEMPTS);
+    assert.equal(attempts.filter((id) => id === 2).length, 1);
+    assert.deepEqual(
+      harness
+        .rows(`SELECT attachment_id FROM document_tokenizer`)
+        .map((row) => row.attachment_id),
+      [2, 3],
+    );
+    assert.lengthOf(
+      warns.filter((w) => /attachment 1 failed/.test(w)),
+      1,
+      "one warning naming the attachment",
+    );
   });
 
   it("does not take a prefetch job while a retrieval is in flight, even when the user is idle", async function () {

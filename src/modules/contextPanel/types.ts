@@ -19,6 +19,7 @@ import type {
   OtherContextRef,
   CollectionContextRef,
   TagContextRef,
+  AttachedConversationRef,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../../shared/types";
@@ -45,6 +46,7 @@ export type {
   OtherContextRef,
   CollectionContextRef,
   TagContextRef,
+  AttachedConversationRef,
   GlobalConversationSummary,
   PaperConversationSummary,
 } from "../../shared/types";
@@ -76,6 +78,11 @@ export interface Message {
   selectedTextPaperContexts?: (PaperContextRef | undefined)[];
   selectedTextNoteContexts?: (NoteContextRef | undefined)[];
   selectedTextExpandedIndex?: number;
+  /**
+   * Session-only: the sent chips the user left expanded, after a toggle.
+   * Unset means the default (chips with a question open).
+   */
+  selectedTextExpandedIndices?: number[];
   screenshotImages?: string[];
   paperContexts?: PaperContextRef[];
   pdfPaperContexts?: PaperContextRef[];
@@ -87,10 +94,12 @@ export interface Message {
   pinnedPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
   selectedTagContexts?: TagContextRef[];
+  attachedConversations?: AttachedConversationRef[];
   /** Skill IDs explicitly selected via slash command for this turn. */
   forcedSkillIds?: string[];
   collectionContextsExpanded?: boolean;
   tagContextsExpanded?: boolean;
+  attachedConversationsExpanded?: boolean;
   paperContextsExpanded?: boolean;
   attachments?: ChatAttachment[];
   modelAttachments?: ChatAttachment[];
@@ -319,6 +328,11 @@ export type SendQuestionOptions = {
   requestId?: number;
   /** Internal notification that asynchronous preparation has handed off to the provider. */
   onProviderDispatch?: () => void;
+  annotationReplyBatchId?: string;
+  onAnnotationReplyComplete?: (
+    rawAnswer: string,
+    complete: boolean,
+  ) => Promise<"applied" | "stored-only">;
   /** Resolved panel/source context selected by compose UI. */
   contextSource?: ResolvedContextSource | null;
   question: string;
@@ -352,6 +366,7 @@ export type SendQuestionOptions = {
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
   selectedTagContexts?: TagContextRef[];
+  attachedConversations?: AttachedConversationRef[];
   /** Attachments shown in chat history. */
   attachments?: ChatAttachment[];
   /** Provider-resolved attachments sent to the model. Defaults to `attachments`. */
@@ -399,6 +414,7 @@ export type EditRetryOptions = {
   fullTextPaperContexts?: PaperContextRef[];
   selectedCollectionContexts?: CollectionContextRef[];
   selectedTagContexts?: TagContextRef[];
+  attachedConversations?: AttachedConversationRef[];
   /** Attachments shown in chat history. */
   attachments?: ChatAttachment[];
   /** Provider-resolved attachments sent to the retry request. Defaults to `attachments`. */

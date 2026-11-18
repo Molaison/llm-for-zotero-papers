@@ -1798,17 +1798,12 @@ describe("citation navigation characterization", function () {
 
       assert.deepEqual(r.opened, [{ itemId: 101, location: { pageIndex: 0 } }]);
       assert.deepEqual(failedJumpStages(r), []);
-      // The same span four times: the refused search, two restore passes that
-      // re-send the last query after it (findQueries cannot tell them apart),
-      // then the retry with the verified wording that succeeds.
+      // The same span twice: the refused search, then the retry with the
+      // verified wording that succeeds. (Between them, the reader's earlier
+      // empty search is put back; findQueries leaves empty searches out.)
       const span =
         "Dopamine release in the ventral striatum tracked the reward prediction error on";
-      assert.deepEqual(r.findQueries(paper.attachmentId), [
-        span,
-        span,
-        span,
-        span,
-      ]);
+      assert.deepEqual(r.findQueries(paper.attachmentId), [span, span]);
       assert.deepEqual(statusTexts(r), [
         "sending: Locating cited quote...",
         "ready: Jumped to cited source (page 1, paragraph matched)",
@@ -1966,6 +1961,37 @@ describe("citation navigation characterization", function () {
         { pageIndex: 1, pageLabel: "102" },
         { pageIndex: 1, pageLabel: "102" },
       ]);
+    });
+
+    it("Task progress: a cited quote not in the PDF opens the page its citation recorded", async function () {
+      // A citation's label names the paper, not a page; the page the quote
+      // recorded is given outright and read as a page number.
+      const paper = smith();
+      const r = install({ papers: [paper] });
+
+      const outcome = await navigateToTaskPaperPassage({
+        body: r.body,
+        target: {
+          itemId: 10,
+          contextItemId: 11,
+          libraryID: 1,
+          rawSnippet: QUOTE_MISSING,
+          cleanedSnippet: QUOTE_MISSING,
+          label: "(Smith, 2021)",
+          pageLabel: "2",
+          granularity: "passage",
+        },
+      });
+
+      assert.equal(outcome, "page");
+      assert.deepEqual(r.reader(11)!.navigations, [
+        { pageIndex: 1, pageLabel: "102" },
+        { pageIndex: 1, pageLabel: "102" },
+      ]);
+      assert.equal(
+        statusTexts(r).pop(),
+        "warning: Couldn't find this passage in the PDF; opened page 102",
+      );
     });
 
     it("Task progress: an old read's guessed label is never matched against printed labels (D5)", async function () {

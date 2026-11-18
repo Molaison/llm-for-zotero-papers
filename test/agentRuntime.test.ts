@@ -1,3 +1,6 @@
+import { OpenAIResponsesAgentAdapter } from "../src/agent/model/openaiResponses";
+import { createPdfFixture } from "./helpers/pdfFixture";
+import type { ModelRecoveryError } from "../src/utils/modelErrorRecovery";
 import { PdfService } from "../src/agent/services/pdfService";
 import { AgentRunContinuationSession } from "../src/agent/continuation/runContinuationSession";
 import { appendAgentRunEvent } from "../src/agent/store/traceStore";
@@ -20,7 +23,7 @@ import { createSubmitDocumentTool } from "../src/agent/tools/control/submitDocum
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentRuntime } from "../src/agent/runtime";
+import { AgentRuntime, webSourceNumberSeed } from "../src/agent/runtime";
 import { clearAgentReadLedger } from "../src/agent/context/resourceContextPlan";
 import { clearAgentCoverageLedger } from "../src/agent/context/coverageLedger";
 import {
@@ -41,8 +44,10 @@ import {
   clearAgentToolResultHandleStore,
   createAgentToolResultHandleRecord,
   getAgentToolResultHandle,
+  hasAgentToolResultHandles,
   upsertAgentToolResultHandles,
 } from "../src/agent/store/toolResultHandles";
+import { EPHEMERAL_GLOBAL_CONVERSATION_KEY_BASE } from "../src/shared/conversationKeySpace";
 import { AgentToolRegistry } from "../src/agent/tools/registry";
 import { createBuiltInToolRegistry } from "../src/agent/tools";
 import {
@@ -53,6 +58,7 @@ import { createContextReadTool } from "../src/agent/tools/read/contextRead";
 import { createFileIOTool } from "../src/agent/tools/write/fileIO";
 import { createWebSearchTool } from "../src/agent/tools/read/webSearch";
 import { createPaperReadTool } from "../src/agent/tools/read/paperRead";
+import { getWebSourceAnchorsFromTrace } from "../src/webAccess/attribution";
 import { TAVILY_API_KEY_PREF } from "../src/webAccess/prefs";
 import type { WebAccessProvider } from "../src/webAccess/types";
 import {
@@ -60,7 +66,10 @@ import {
   MAX_AGENT_TOOL_CALLS_PER_ROUND,
   answerContinuationCeiling,
 } from "../src/agent/model/limits";
-import { resolveAgentPromptBudgetLimits } from "../src/agent/context/promptBudget";
+import {
+  estimateAgentPromptTokens,
+  resolveAgentPromptBudgetLimits,
+} from "../src/agent/context/promptBudget";
 import { resolveOutputReserve } from "../src/utils/outputTokenPolicy";
 import { estimateContextMessagesTokens } from "../src/utils/modelInputCap";
 import {
@@ -102,6 +111,11 @@ import { createTaskUpdateTool } from "../src/agent/tools/control/taskUpdate";
 import { OUTCOME_REASONS } from "../src/agent/loop/outcomes";
 import { ExecutionCheckpointFold } from "../src/agent/execution/checkpointEvents";
 import { isTruncatedToolResultContent } from "../src/agent/store/traceStore";
+import { createLiteratureSearchTool } from "../src/agent/tools/read/literatureSearch";
+import {
+  outsideSearchCount,
+  outsideSearchLatch,
+} from "../src/agent/tools/read/outsideSearchLedger";
 
 function registerZeroEffectLibraryUpdate(registry: AgentToolRegistry): void {
   registry.register({
@@ -205,6 +219,150 @@ describe("AgentRuntime", function () {
     clearAgentTranscriptStore();
     clearAgentToolResultHandleStore();
   });
+
+  for (const withPdf of [true, false]) {
+    it(`PDF review F2: ${withPdf ? "stops a PDF 413 after one real runtime POST" : "keeps ordinary token-size compaction recovery"}`, async function () {
+      const restoreDb = installMockDb();
+      const globals = globalThis as any;
+      const originalToolkit = globals.ztoolkit;
+      const originalIO = globals.IOUtils;
+      let posts = 0;
+      let firstError:
+        | (ModelRecoveryError & { status?: number; retryAfterMs?: number })
+        | undefined;
+      const events: AgentEvent[] = [];
+      globals.IOUtils = { read: async () => createPdfFixture(2) };
+      globals.ztoolkit = {
+        getGlobal: (name: string) =>
+          name === "fetch"
+            ? async (_url: string, _init: RequestInit) => {
+                posts++;
+                if (posts === 1)
+                  return {
+                    ok: false,
+                    status: 413,
+                    statusText: "Request Too Large",
+                    headers: new Headers({ "retry-after": "3" }),
+                    text: async () => "request too large: ORIGINAL_INPUT_BODY",
+                  };
+                return {
+                  ok: true,
+                  body: undefined,
+                  json: async () => ({
+                    status: "completed",
+                    output_text: "Recovered text answer",
+                    output: [
+                      {
+                        type: "message",
+                        role: "assistant",
+                        content: [
+                          {
+                            type: "output_text",
+                            text: "Recovered text answer",
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                };
+              }
+            : undefined,
+        log: () => {},
+      };
+      try {
+        const runtime = new AgentRuntime({
+          registry: new AgentToolRegistry(),
+          adapterFactory: () => {
+            const adapter = new OpenAIResponsesAgentAdapter();
+            const runStep = adapter.runStep.bind(adapter);
+            adapter.runStep = async (params) => {
+              try {
+                return await runStep(params);
+              } catch (error) {
+                firstError ??= error as typeof firstError;
+                throw error;
+              }
+            };
+            return adapter;
+          },
+        });
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: withPdf ? 7_940_081 : 7_940_082,
+            mode: "agent",
+            userText: "Read the supplied input",
+            model: "gpt-6.1-sol",
+            apiBase: "https://compat.invalid/v1",
+            apiKey: "offline-only",
+            authMode: "api_key",
+            providerProtocol: "responses_api",
+            advanced: {
+              inputTokenCap: 128_000,
+              ...(withPdf ? { inputMode: "pdf_allowed" as const } : {}),
+            },
+            ...(withPdf
+              ? {
+                  attachments: [
+                    {
+                      id: "review-pdf",
+                      name: "review.pdf",
+                      mimeType: "application/pdf",
+                      category: "pdf" as const,
+                      sizeBytes: 840,
+                      storedPath: "/synthetic/review.pdf",
+                    },
+                  ],
+                }
+              : {}),
+          },
+          onEvent: (event) => {
+            events.push(event);
+          },
+        });
+        assert.equal(firstError?.status, 413);
+        assert.equal(firstError?.retryAfterMs, 3000);
+        assert.include(firstError?.message || "", "ORIGINAL_INPUT_BODY");
+        const compacted = events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_model_retry" &&
+            event.payload?.action === "compact",
+        );
+        if (withPdf) {
+          assert.equal(
+            posts,
+            1,
+            "the actual runtime must not compact/checkpoint and redispatch this PDF",
+          );
+          assert.equal(outcome.kind, "failed");
+          assert.isFalse(compacted);
+          assert.deepEqual(firstError?.modelRecovery, {
+            automaticRecovery: "none",
+            source: "pdf_input",
+          });
+          assert.isFalse(
+            events.some(
+              (event) =>
+                event.type === "provider_event" &&
+                event.providerType === "agent_model_retry",
+            ),
+          );
+        } else {
+          assert.isTrue(
+            compacted,
+            "ordinary token/context size errors retain their compaction path",
+          );
+          assert.isAtLeast(posts, 2);
+          assert.equal(outcome.kind, "completed");
+          assert.isUndefined(firstError?.modelRecovery);
+        }
+      } finally {
+        globals.ztoolkit = originalToolkit;
+        globals.IOUtils = originalIO;
+        restoreDb();
+      }
+    });
+  }
 
   it("keeps default paper text across retrieval, follow-ups, and an added paper", async function () {
     const restore = installMockDb();
@@ -334,6 +492,78 @@ describe("AgentRuntime", function () {
       );
     } finally {
       PdfService.prototype.ensurePaperContext = originalLoad;
+      restore();
+    }
+  });
+
+  it("completes a side chat agent turn and keeps its tool results in memory", async function () {
+    const restore = installMockDb();
+    const conversationKey = EPHEMERAL_GLOBAL_CONVERSATION_KEY_BASE + 17;
+    const call = { id: "side-read", name: "query_library", arguments: {} };
+    try {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "query_library",
+          description: "Read library",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        execute: async () => ({ results: [{ itemId: 3, title: "Paper" }] }),
+      });
+      let step = 0;
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+          }),
+          supportsTools: () => true,
+          async runStep(): Promise<AgentModelStep> {
+            step++;
+            if (step === 1)
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            return {
+              kind: "final",
+              text: "Side answer.",
+              assistantMessage: { role: "assistant", content: "Side answer." },
+            };
+          },
+        }),
+      });
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey,
+          libraryID: 1,
+          mode: "agent",
+          userText: "a test",
+          model: "gpt-5.4",
+          apiBase: "https://api.openai.com/v1/responses",
+          apiKey: "test",
+        },
+      });
+      // The final transcript checkpoint is accepted in memory, so the turn
+      // completes instead of failing as "checkpoint skipped".
+      assert.equal(outcome.kind, "completed");
+      assert.equal(outcome.text, "Side answer.");
+      assert.isTrue(
+        hasAgentToolResultHandles(conversationKey),
+        "the side chat's tool result stays readable in memory",
+      );
+    } finally {
+      clearAgentToolResultHandleStore();
       restore();
     }
   });
@@ -2248,11 +2478,17 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("rejects an oversized native tool step whole and retries from a semantic checkpoint", async function () {
-    const restoreDb = installMockDb();
+  it("runs the first tool calls of an oversized step, each write authorized alone, and not the rest", async function () {
+    const installed = installMockDb();
     try {
-      const registry = new AgentToolRegistry();
-      let executionCount = 0;
+      await initAgentChangeJournal();
+      // "safe": every write asks for its own card.
+      globalThis.Zotero.Prefs.set(
+        "extensions.zotero.llmforzotero.originalAgentPermissionMode",
+        "safe",
+      );
+      const registry = new AgentToolRegistry(createTestActionContractService());
+      const ran: string[] = [];
       registry.register({
         spec: {
           name: "read_context",
@@ -2261,18 +2497,56 @@ describe("AgentRuntime", function () {
           executionClass: "read",
           requiresConfirmation: false,
         },
-        validate: () => ({ ok: true, value: {} }),
-        execute: async () => {
-          executionCount += 1;
-          return { ok: true };
+        validate: (args) => ({ ok: true, value: args as never }),
+        execute: async (input: { id: string }) => {
+          ran.push(input.id);
+          return { read: input.id };
         },
-      });
-
+      } as never);
+      registry.register({
+        effectOperations: ["command_execute"],
+        spec: {
+          name: "confirmation_write",
+          description: "write",
+          inputSchema: { type: "object" },
+          executionClass: "external_effect",
+          requiresConfirmation: true,
+        },
+        validate: (args) => ({ ok: true, value: args as never }),
+        describeAction: (input: { id: string }) =>
+          commandActionDescriptor(`command_execute:${input.id}`),
+        planInvocation: () =>
+          stateChangeInvocationPlan({
+            reversibility: "full",
+            reason: "Test confirmed write.",
+          }),
+        createPendingAction: (input: { id: string }) => ({
+          toolName: "confirmation_write",
+          title: `Write ${input.id}`,
+          confirmLabel: "Apply",
+          cancelLabel: "Cancel",
+          fields: [],
+        }),
+        execute: async (input: { id: string }) => {
+          ran.push(input.id);
+          return {
+            content: { status: "saved", id: input.id },
+            effect: "applied",
+          };
+        },
+      } as never);
+      // Nine calls: writes at the second, fifth and ninth place.
+      const writes = new Set([1, 4, 8]);
+      const calls = Array.from(
+        { length: MAX_AGENT_TOOL_CALLS_PER_ROUND + 1 },
+        (_unused, index) => ({
+          id: `call-${index}`,
+          name: writes.has(index) ? "confirmation_write" : "read_context",
+          arguments: { id: `${writes.has(index) ? "w" : "r"}${index}` },
+        }),
+      );
       let modelStep = 0;
-      let resetCount = 0;
-      let sawBoundedFollowup = false;
-      let initialMessages: AgentModelMessage[] = [];
-      const overLimitCallCount = MAX_AGENT_TOOL_CALLS_PER_ROUND + 1;
+      let notRun = "";
       const runtime = new AgentRuntime({
         registry,
         adapterFactory: () => ({
@@ -2282,21 +2556,9 @@ describe("AgentRuntime", function () {
             multimodal: false,
           }),
           supportsTools: () => true,
-          resetState: () => {
-            resetCount += 1;
-          },
           async runStep(params: AgentStepParams): Promise<AgentModelStep> {
             modelStep += 1;
-            if (modelStep === 1) {
-              initialMessages = structuredClone(params.messages);
-              const calls = Array.from(
-                { length: overLimitCallCount },
-                (_unused, index) => ({
-                  id: `call-${index + 1}`,
-                  name: "read_context",
-                  arguments: {},
-                }),
-              );
+            if (modelStep === 1)
               return {
                 kind: "tool_calls",
                 calls,
@@ -2306,95 +2568,52 @@ describe("AgentRuntime", function () {
                   tool_calls: calls,
                 },
               };
-            }
-            if (modelStep === 2) {
-              const restartedMessages = structuredClone(params.messages);
-              assert.isTrue(
-                restartedMessages.every(
-                  (message) =>
-                    message.role === "system" || message.role === "user",
-                ),
-              );
-              assert.deepEqual(
-                restartedMessages.slice(0, -1),
-                initialMessages,
-                "the frozen system/current-turn envelope must be unchanged",
-              );
-              assert.equal(restartedMessages.at(-1)?.role, "user");
-              assert.include(
-                JSON.stringify(restartedMessages.at(-1)),
-                "Agent semantic continuation checkpoint",
-              );
-              assert.equal(
-                restartedMessages.filter((message) =>
-                  JSON.stringify(message).includes(
-                    "Agent semantic continuation checkpoint",
-                  ),
-                ).length,
-                1,
-              );
-              assert.include(
-                restartedMessages
-                  .map((message) =>
-                    typeof message.content === "string" ? message.content : "",
-                  )
-                  .join("\n"),
-                `at most ${MAX_AGENT_TOOL_CALLS_PER_ROUND} tool calls`,
-              );
-              const call = {
-                id: "bounded-call",
-                name: "read_context",
-                arguments: {},
-              };
-              return {
-                kind: "tool_calls",
-                calls: [call],
-                assistantMessage: {
-                  role: "assistant",
-                  content: "",
-                  tool_calls: [call],
-                },
-              };
-            }
-            const toolMessages = params.messages.filter(
-              (message) => message.role === "tool",
+            notRun = String(
+              params.messages.find(
+                (message) =>
+                  message.role === "tool" && message.tool_call_id === "call-8",
+              )?.content ?? "",
             );
-            sawBoundedFollowup =
-              toolMessages.length === 1 &&
-              toolMessages[0].tool_call_id === "bounded-call";
             return {
               kind: "final",
-              text: sawBoundedFollowup ? "Done." : "Inconsistent.",
-              assistantMessage: {
-                role: "assistant",
-                content: sawBoundedFollowup ? "Done." : "Inconsistent.",
-              },
+              text: "Done.",
+              assistantMessage: { role: "assistant", content: "Done." },
             };
           },
         }),
       });
-
+      const cards: string[] = [];
       const outcome = await runtime.runTurn({
         request: {
-          conversationKey: 1,
+          conversationKey: 705,
           mode: "agent",
-          userText: "summarize the paper",
-          systemPrompt: "SYSTEM_RESTART_SENTINEL",
-          customInstructions: "CUSTOM_RESTART_SENTINEL",
+          libraryID: 1,
+          userText: "read and write everything at once",
           model: "gpt-4o-mini",
           apiBase: "https://api.openai.com/v1/chat/completions",
           apiKey: "test",
         },
+        onEvent: (event) => {
+          if (event.type === "confirmation_required") {
+            cards.push(String(event.action.title));
+            // The card is shown while the write before it has run.
+            runtime.resolveConfirmation(event.requestId, true);
+          }
+        },
       });
 
-      assert.equal(outcome.kind, "completed");
-      if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, "Done.");
-      assert.isTrue(sawBoundedFollowup);
-      assert.equal(executionCount, 1);
-      assert.equal(resetCount, 1);
+      assert.equal(outcome.kind, "completed", failedMessage(outcome));
+      assert.equal(modelStep, 2);
+      assert.deepEqual(cards, ["Write w1", "Write w4"]);
+      assert.deepEqual(ran, ["r0", "w1", "r2", "r3", "w4", "r5", "r6", "r7"]);
+      assert.equal(
+        notRun,
+        JSON.stringify({
+          error: `Not run: this step allows ${MAX_AGENT_TOOL_CALLS_PER_ROUND} tool calls; call it again in the next step.`,
+        }),
+      );
     } finally {
-      restoreDb();
+      installed();
     }
   });
 
@@ -2434,23 +2653,9 @@ describe("AgentRuntime", function () {
           async runStep(): Promise<AgentModelStep> {
             modelStep += 1;
             installed.setTranscriptWriteFailure(true);
-            const calls = Array.from(
-              { length: MAX_AGENT_TOOL_CALLS_PER_ROUND + 1 },
-              (_unused, index) => ({
-                id: `rejected-${index}`,
-                name: "read_context",
-                arguments: {},
-              }),
-            );
-            return {
-              kind: "tool_calls",
-              calls,
-              assistantMessage: {
-                role: "assistant",
-                content: "",
-                tool_calls: calls,
-              },
-            };
+            // A prompt the provider calls too long restarts from a
+            // semantic checkpoint, which cannot be stored.
+            throw new Error("prompt is too long");
           },
         }),
       });
@@ -2542,6 +2747,8 @@ describe("AgentRuntime", function () {
         let modelSteps = 0;
         let continuationMessages: AgentModelMessage[] = [];
         const runtime = new AgentRuntime({
+          // The retry waits are the policy's; this test only needs its order.
+          modelRetryBackoffMs: [0, 0],
           registry: new AgentToolRegistry(),
           adapterFactory: () => ({
             getCapabilities: () => ({
@@ -2862,11 +3069,12 @@ describe("AgentRuntime", function () {
     }
   });
 
-  it("bounds stream recovery to one retry instead of an endless interrupted Plan", async function () {
+  it("bounds stream recovery to the retry policy instead of an endless interrupted Plan", async function () {
     const restoreDb = installMockDb();
     try {
       let calls = 0;
       const runtime = new AgentRuntime({
+        modelRetryBackoffMs: [0, 0],
         registry: new AgentToolRegistry(),
         adapterFactory: () => ({
           getCapabilities: () => ({
@@ -2893,7 +3101,8 @@ describe("AgentRuntime", function () {
           userText: "finish this task",
         },
       });
-      assert.equal(calls, 2);
+      // One step and its two retries (turnBoundary.ts, Rule 4).
+      assert.equal(calls, 3);
       assert.equal(outcome.kind, "completed");
       if (outcome.kind === "completed") assert.include(outcome.text, "stream");
       assert.equal([...restoreDb.runs.values()][0]?.status, "failed");
@@ -3812,13 +4021,15 @@ describe("AgentRuntime", function () {
       const restoreDb = installMockDb();
       try {
         let restartedInput = "";
-        const calls = Array.from({ length: 9 }, (_, index) =>
-          readCall(`call-${index}`),
-        );
         const runtime = scriptedRuntime([
           async (params) => {
             await params.onTextDelta?.(SUMMARIES);
-            return toolStep(SUMMARIES, calls);
+            return toolStep(SUMMARIES);
+          },
+          // A prompt the provider calls too long restarts the model from a
+          // semantic checkpoint.
+          async () => {
+            throw new Error("prompt is too long");
           },
           async (params) => {
             restartedInput = JSON.stringify(params.messages);
@@ -6704,7 +6915,8 @@ describe("AgentRuntime", function () {
       const budgetEvent = events.find(
         (event) =>
           event.type === "provider_event" &&
-          event.providerType === "agent_context_budget",
+          event.providerType === "agent_context_budget" &&
+          event.payload?.action === "compacted_model_prompt",
       );
       assert.exists(budgetEvent);
       assert.equal(
@@ -7401,6 +7613,400 @@ describe("AgentRuntime", function () {
     }
   });
 
+  it("budget feedback: repairs rejected input after compaction without recursively reading handles", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      const rawPath = "/private/papers/rejected-input.pdf";
+      const rejection =
+        "read and overrides are only valid with expectedEffect:'digest'";
+      let executed = 0;
+      registry.register({
+        spec: {
+          name: "task_update",
+          description: "Record task",
+          inputSchema: { type: "object" },
+          executionClass: "control",
+          requiresConfirmation: false,
+        },
+        validate: (args) =>
+          (args as { expectedEffect: string }).expectedEffect === "digest"
+            ? { ok: true, value: args }
+            : { ok: false, error: `${rejection}; source=${rawPath}` },
+        execute: async () => {
+          executed++;
+          registry.register({
+            spec: {
+              name: "recovered_read",
+              description: "New round tool ".repeat(80),
+              inputSchema: { type: "object" },
+              executionClass: "read",
+              requiresConfirmation: false,
+            },
+            validate: () => ({ ok: true, value: {} }),
+            execute: async () => ({ content: {} }),
+          });
+          return { content: { status: "fixed" } };
+        },
+      });
+      registry.register(createContextReadTool());
+      let stepIndex = 0;
+      const toolSets: string[][] = [];
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            stepIndex++;
+            toolSets.push(params.tools.map((tool) => tool.name));
+            assert.equal(
+              params.request.runtimeContextBudget?.usedContextTokens,
+              estimateAgentPromptTokens(params.messages, params.tools),
+            );
+            if (stepIndex === 2) {
+              const prompt = JSON.stringify(
+                params.messages.filter(
+                  (message) =>
+                    typeof message.content === "string" &&
+                    message.content.startsWith(
+                      "Agent semantic continuation checkpoint:",
+                    ),
+                ),
+              );
+              assert.include(prompt, "task_update");
+              assert.include(prompt, rejection);
+              assert.notInclude(prompt, rawPath);
+              assert.include(prompt, "[raw_pdf_path:zotero-pdf:10:11]");
+              assert.notInclude(prompt, "PRIVATE_UNKNOWN_ARGUMENT");
+            }
+            if (stepIndex <= 2) {
+              if (stepIndex === 1)
+                await params.onUsage?.({
+                  promptTokens: 12_525,
+                  completionTokens: 0,
+                  totalTokens: 12_525,
+                });
+              const call = {
+                id: `repair-${stepIndex}`,
+                name: "task_update",
+                arguments: {
+                  expectedEffect: stepIndex === 1 ? "read" : "digest",
+                  read: { source: "full" },
+                  unknown: "PRIVATE_UNKNOWN_ARGUMENT",
+                },
+              };
+              return {
+                kind: "tool_calls",
+                calls: [call],
+                assistantMessage: {
+                  role: "assistant",
+                  content: "",
+                  tool_calls: [call],
+                },
+              };
+            }
+            return {
+              kind: "final",
+              text: "Repaired.",
+              assistantMessage: { role: "assistant", content: "Repaired." },
+            };
+          },
+        }),
+      });
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 7_940_008,
+          libraryID: 1,
+          mode: "agent",
+          userText: "Repair the tool input.",
+          model: "gpt-6.1-sol",
+          apiBase: "https://api.openai.com/v1",
+          apiKey: "test",
+          advanced: { inputTokenCap: 16_000 },
+          pdfPaperContexts: [
+            {
+              itemId: 10,
+              contextItemId: 11,
+              title: "Selected",
+              contentSourceMode: "pdf",
+            },
+          ],
+          localDocuments: [
+            {
+              kind: "local_pdf",
+              sourceKey: "zotero-pdf:10:11",
+              itemId: 10,
+              contextItemId: 11,
+              title: "Selected",
+              name: "rejected-input.pdf",
+              mimeType: "application/pdf",
+              absolutePath: rawPath,
+            },
+          ],
+        },
+      });
+      assert.equal(
+        outcome.kind,
+        "completed",
+        outcome.kind === "failed" ? outcome.message : undefined,
+      );
+      assert.equal(executed, 1);
+      assert.equal(stepIndex, 3);
+      assert.include(toolSets[1], "context_read");
+      assert.notInclude(toolSets[0], "recovered_read");
+      assert.include(toolSets[2], "recovered_read");
+      const persisted = JSON.stringify(
+        readPersistedTranscript(restoreDb, 7_940_008),
+      );
+      assert.notInclude(persisted, rawPath);
+      assert.include(persisted, "[raw_pdf_path:zotero-pdf:10:11]");
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("budget feedback: settles repeated replay restarts when neither estimate nor usage shrinks", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      registry.register({
+        spec: {
+          name: "small_read",
+          description: "Read",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: () => ({ ok: true, value: {} }),
+        execute: async () => ({ content: { value: "small result" } }),
+      });
+      registry.register(createContextReadTool());
+      let stepIndex = 0;
+      let resets = 0;
+      const events: AgentEvent[] = [];
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          resetState: () => {
+            resets++;
+          },
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            stepIndex++;
+            assert.isAtMost(stepIndex, 2, "no third oversized dispatch");
+            await params.onUsage?.({
+              promptTokens: 12_525,
+              completionTokens: stepIndex === 1 ? 1_000 : 0,
+              totalTokens: stepIndex === 1 ? 13_525 : 12_525,
+            });
+            const call = {
+              id: `budget-read-${stepIndex}`,
+              name: "small_read",
+              arguments: {},
+            };
+            return {
+              kind: "tool_calls",
+              calls: [call],
+              assistantMessage: {
+                role: "assistant",
+                content: "",
+                tool_calls: [call],
+              },
+            };
+          },
+        }),
+      });
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 7_940_009,
+          mode: "agent",
+          userText: "Use the result.",
+          model: "gpt-6.1-sol",
+          apiBase: "https://api.openai.com/v1",
+          apiKey: "test",
+          advanced: { inputTokenCap: 16_000 },
+        },
+        onEvent: (event) => events.push(event),
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.equal(outcome.runStatus, "failed");
+      assert.equal(stepIndex, 2);
+      assert.equal(resets, 2);
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_context_budget" &&
+            event.payload?.action === "budget_restart_no_reduction",
+        ),
+      );
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_run_stop" &&
+            event.payload?.rule === "prompt_budget_exceeded",
+        ),
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("budget feedback: starts a new replay guard cycle after an in-budget round with new paper progress", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const registry = new AgentToolRegistry();
+      const readPapers: number[] = [];
+      registry.register({
+        spec: {
+          name: "small_read",
+          description: "Read next paper",
+          inputSchema: { type: "object" },
+          executionClass: "read",
+          requiresConfirmation: false,
+        },
+        validate: (args) => ({ ok: true, value: args as { paper: number } }),
+        execute: async (args: { paper: number }) => {
+          readPapers.push(args.paper);
+          return {
+            content: {
+              paper: args.paper,
+              evidence: `new PDF evidence ${args.paper}`,
+            },
+          };
+        },
+      });
+      registry.register(createContextReadTool());
+      let stepIndex = 0;
+      let resets = 0;
+      let firstCheckpointTokens = 0;
+      const events: AgentEvent[] = [];
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => ({
+          getCapabilities: () => ({
+            streaming: false,
+            toolCalls: true,
+            multimodal: false,
+            fileInputs: false,
+            reasoning: true,
+          }),
+          supportsTools: () => true,
+          resetState: () => {
+            resets++;
+          },
+          async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+            stepIndex++;
+            if (stepIndex === 2)
+              firstCheckpointTokens =
+                params.request.runtimeContextBudget!.usedContextTokens;
+            if (stepIndex === 4) {
+              // The newer checkpoint carries more evidence, so comparing it
+              // with the previous cycle's smaller checkpoint would reject it.
+              assert.isAtLeast(
+                params.request.runtimeContextBudget!.usedContextTokens,
+                firstCheckpointTokens,
+              );
+              await params.onUsage?.({
+                promptTokens: 14_000,
+                completionTokens: 0,
+                totalTokens: 14_000,
+              });
+              return {
+                kind: "final",
+                text: "Read three papers across two budget cycles.",
+                assistantMessage: {
+                  role: "assistant",
+                  content: "Read three papers across two budget cycles.",
+                },
+              };
+            }
+            assert.isAtMost(stepIndex, 4);
+            const inputTokens = [22_000, 12_000, 23_000][stepIndex - 1];
+            await params.onUsage?.({
+              promptTokens: inputTokens,
+              completionTokens: 0,
+              totalTokens: inputTokens,
+            });
+            const call = {
+              id: `new-paper-${stepIndex}`,
+              name: "small_read",
+              arguments: { paper: stepIndex },
+            };
+            return {
+              kind: "tool_calls",
+              calls: [call],
+              assistantMessage: {
+                role: "assistant",
+                content: "",
+                tool_calls: [call],
+              },
+            };
+          },
+        }),
+      });
+      const limits = resolveAgentPromptBudgetLimits({
+        model: "gpt-6.1-sol",
+        inputTokenCap: 32_000,
+      });
+      assert.isBelow(12_000, limits.softLimitTokens);
+      assert.isAbove(22_000, limits.softLimitTokens);
+      const outcome = await runtime.runTurn({
+        request: {
+          conversationKey: 7_940_010,
+          mode: "agent",
+          userText: "Read the next papers and preserve each result.",
+          model: "gpt-6.1-sol",
+          apiBase: "https://api.openai.com/v1",
+          apiKey: "test",
+          advanced: { inputTokenCap: 32_000 },
+        },
+        onEvent: (event) => events.push(event),
+      });
+      assert.equal(outcome.kind, "completed");
+      assert.notEqual(
+        outcome.runStatus,
+        "failed",
+        "normal progress must start a fresh restart cycle",
+      );
+      assert.equal(stepIndex, 4);
+      assert.equal(resets, 2);
+      assert.deepEqual(readPapers, [1, 2, 3]);
+      const replayEvents = events.filter(
+        (event) =>
+          event.type === "provider_event" &&
+          event.providerType === "agent_context_budget" &&
+          event.payload?.action === "checkpoint_provider_replay_usage",
+      );
+      assert.lengthOf(replayEvents, 2);
+      assert.isFalse(
+        events.some(
+          (event) =>
+            event.type === "provider_event" &&
+            event.providerType === "agent_context_budget" &&
+            event.payload?.action === "budget_restart_no_reduction",
+        ),
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
   it("checkpoints cached provider state when reported replay usage exceeds the send budget", async function () {
     const restoreDb = installMockDb();
     try {
@@ -7598,9 +8204,9 @@ describe("AgentRuntime", function () {
 
             if (stepIndex <= 2) {
               await params.onUsage?.({
-                promptTokens: 90_000,
+                promptTokens: stepIndex === 1 ? 90_000 : 80_000,
                 completionTokens: 10_000,
-                totalTokens: 100_000,
+                totalTokens: stepIndex === 1 ? 100_000 : 90_000,
               });
               const call = {
                 id: `small-read-${stepIndex}`,
@@ -7981,7 +8587,11 @@ describe("web attribution runtime guard", function () {
       {
         id: "web-call-1",
         name: "web_search",
-        arguments: { query: "current fact", depth: "basic" },
+        arguments: {
+          query: "current fact",
+          depth: "basic",
+          need: "current_or_public_facts",
+        },
       },
     ],
     assistantMessage: {
@@ -7991,7 +8601,11 @@ describe("web attribution runtime guard", function () {
         {
           id: "web-call-1",
           name: "web_search",
-          arguments: { query: "current fact", depth: "basic" },
+          arguments: {
+            query: "current fact",
+            depth: "basic",
+            need: "current_or_public_facts",
+          },
         },
       ],
     },
@@ -8038,7 +8652,10 @@ describe("web attribution runtime guard", function () {
                   {
                     id: "web-call-missing-depth",
                     name: "web_search",
-                    arguments: { query: "current fact" },
+                    arguments: {
+                      query: "current fact",
+                      need: "current_or_public_facts",
+                    },
                   },
                 ],
                 assistantMessage: {
@@ -8048,7 +8665,10 @@ describe("web attribution runtime guard", function () {
                     {
                       id: "web-call-missing-depth",
                       name: "web_search",
-                      arguments: { query: "current fact" },
+                      arguments: {
+                        query: "current fact",
+                        need: "current_or_public_facts",
+                      },
                     },
                   ],
                 },
@@ -8066,7 +8686,11 @@ describe("web attribution runtime guard", function () {
                   {
                     id: "web-call-corrected",
                     name: "web_search",
-                    arguments: { query: "current fact", depth: "basic" },
+                    arguments: {
+                      query: "current fact",
+                      depth: "basic",
+                      need: "current_or_public_facts",
+                    },
                   },
                 ],
                 assistantMessage: {
@@ -8076,7 +8700,11 @@ describe("web attribution runtime guard", function () {
                     {
                       id: "web-call-corrected",
                       name: "web_search",
-                      arguments: { query: "current fact", depth: "basic" },
+                      arguments: {
+                        query: "current fact",
+                        depth: "basic",
+                        need: "current_or_public_facts",
+                      },
                     },
                   ],
                 },
@@ -8122,7 +8750,133 @@ describe("web attribution runtime guard", function () {
     }
   });
 
-  it("allows one correction, persists clean Markdown, and stores terminal anchors", async function () {
+  it("seeds web source numbering from stored web tool results", async function () {
+    const restoreDb = installMockDb();
+    try {
+      const conversationKey = 924;
+      const stored = [
+        {
+          toolName: "web_search",
+          content: { results: [{ sourceId: "web_12" }] },
+        },
+        { toolName: "web_read", content: '{"pages":[{"sourceId":"web_5"}]}' },
+        // Only web tools' results are scanned.
+        { toolName: "paper_read", content: { text: "web_99" } },
+      ].flatMap(({ toolName, content }, index) => {
+        const record = createAgentToolResultHandleRecord({
+          conversationKey,
+          toolName,
+          toolCallId: `call-${index}`,
+          content,
+        });
+        return record ? [record] : [];
+      });
+      await upsertAgentToolResultHandles(stored);
+
+      assert.equal(
+        await webSourceNumberSeed(conversationKey, [{ content: "see web_3" }]),
+        12,
+      );
+      assert.equal(
+        await webSourceNumberSeed(925, [{ content: "see web_3" }]),
+        3,
+      );
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("a second turn numbers web sources after the first turn's", async function () {
+    const restoreDb = installMockDb();
+    try {
+      Zotero.Prefs.set(TAVILY_API_KEY_PREF, "tvly-test", true);
+      let searchCalls = 0;
+      const numberingProvider: WebAccessProvider = {
+        ...provider,
+        search: async (request) => {
+          searchCalls += 1;
+          const response = await provider.search(request);
+          return {
+            ...response,
+            results: response.results.map((result) => ({
+              ...result,
+              url: `https://example.com/current-${searchCalls}`,
+            })),
+          };
+        },
+      };
+      const registry = new AgentToolRegistry();
+      registry.register(createWebSearchTool(() => numberingProvider));
+      const turnSourceIds: string[] = [];
+      const runtime = new AgentRuntime({
+        registry,
+        adapterFactory: () => {
+          let step = 0;
+          return {
+            getCapabilities: () => capabilities,
+            supportsTools: () => true,
+            async runStep(params: AgentStepParams): Promise<AgentModelStep> {
+              step += 1;
+              if (step === 1) return searchStep;
+              const toolMessages = params.messages.filter(
+                (message) =>
+                  message.role === "tool" && message.name === "web_search",
+              );
+              const content = JSON.parse(
+                String(toolMessages.at(-1)?.content),
+              ) as { results?: Array<{ sourceId?: string }> };
+              const sourceId = content.results?.[0]?.sourceId || "";
+              turnSourceIds.push(sourceId);
+              // Turn 2 cites turn 1's ID: a source an earlier question found.
+              const text =
+                turnSourceIds.length === 1
+                  ? `A supported current claim.<!--llm-web-source:${sourceId}-->`
+                  : "Claim.<!--llm-web-source:web_1-->";
+              return {
+                kind: "final",
+                text,
+                assistantMessage: { role: "assistant", content: text },
+              };
+            },
+          };
+        },
+      });
+      const finals: Array<Extract<AgentEvent, { type: "final" }>> = [];
+      for (let turn = 0; turn < 2; turn += 1) {
+        const outcome = await runtime.runTurn({
+          request: {
+            conversationKey: 923,
+            mode: "agent",
+            userText: "What is current?",
+            model: "gpt-4o-mini",
+            apiBase: "https://api.openai.com/v1/chat/completions",
+            apiKey: "test",
+            authMode: "api_key",
+          },
+          onEvent: (event) => {
+            if (event.type === "final") finals.push(event);
+          },
+        });
+        assert.equal(outcome.kind, "completed");
+      }
+
+      assert.deepEqual(turnSourceIds, ["web_1", "web_2"]);
+      const anchors = finals.at(-1)?.webSourceAnchors || [];
+      assert.deepEqual(
+        anchors
+          .filter((anchor) => anchor.placement !== "end")
+          .flatMap((anchor) => anchor.sources.map((item) => item.sourceId)),
+        ["web_1"],
+        "the paragraph's marker names the earlier question's source",
+      );
+      // Every paragraph is marked, so no end chip lists the unused search.
+      assert.isFalse(anchors.some((anchor) => anchor.placement === "end"));
+    } finally {
+      restoreDb();
+    }
+  });
+
+  it("accepts an unmarked answer, persists clean Markdown, and stores an end anchor", async function () {
     const restoreDb = installMockDb();
     try {
       Zotero.Prefs.set(TAVILY_API_KEY_PREF, "tvly-test", true);
@@ -8139,22 +8893,13 @@ describe("web attribution runtime guard", function () {
             modelInputs.push(params.messages.slice());
             step += 1;
             if (step === 1) return searchStep;
-            if (step === 2) {
-              return {
-                kind: "final",
-                text: "An unsupported current claim.",
-                assistantMessage: {
-                  role: "assistant",
-                  content: "An unsupported current claim.",
-                },
-              };
-            }
-            const sourceId = findSourceId(params.messages);
-            const text = `A supported current claim.<!--llm-web-source:${sourceId}-->`;
             return {
               kind: "final",
-              text,
-              assistantMessage: { role: "assistant", content: text },
+              text: "An unsupported current claim.",
+              assistantMessage: {
+                role: "assistant",
+                content: "An unsupported current claim.",
+              },
             };
           },
         }),
@@ -8175,21 +8920,19 @@ describe("web attribution runtime guard", function () {
 
       assert.equal(outcome.kind, "completed");
       if (outcome.kind !== "completed") return;
-      assert.equal(outcome.text, "A supported current claim.");
-      assert.lengthOf(modelInputs, 3);
-      const correction = modelInputs[2].find(
-        (message) =>
-          message.role === "user" &&
-          typeof message.content === "string" &&
-          message.content.includes("Correct the web attribution"),
+      assert.equal(outcome.text, "An unsupported current claim.");
+      assert.lengthOf(modelInputs, 2);
+      assert.notInclude(
+        JSON.stringify(modelInputs),
+        "Correct the web attribution",
       );
-      assert.exists(correction);
       const finalEvent = events.findLast(
         (event): event is Extract<AgentEvent, { type: "final" }> =>
           event.type === "final",
       );
-      assert.equal(finalEvent?.text, "A supported current claim.");
+      assert.equal(finalEvent?.text, "An unsupported current claim.");
       assert.lengthOf(finalEvent?.webSourceAnchors || [], 1);
+      assert.equal(finalEvent?.webSourceAnchors?.[0].placement, "end");
       assert.equal(
         finalEvent?.webSourceAnchors?.[0].offset,
         outcome.text.length,
@@ -8197,23 +8940,24 @@ describe("web attribution runtime guard", function () {
       assert.notInclude(outcome.text, "llm-web-source");
       const transcript = readPersistedTranscript(restoreDb, 921);
       assert.equal(transcript.at(-1)?.role, "assistant");
-      assert.equal(transcript.at(-1)?.content, "A supported current claim.");
+      assert.equal(transcript.at(-1)?.content, "An unsupported current claim.");
       assert.notInclude(JSON.stringify(transcript), "llm-web-source");
     } finally {
       restoreDb();
     }
   });
 
-  it("fails closed after a second invalid attribution response", async function () {
+  it("completes an unmarked web answer with an end chip instead of replacing it", async function () {
     const restoreDb = installMockDb();
     try {
       Zotero.Prefs.set(TAVILY_API_KEY_PREF, "tvly-test", true);
       const registry = new AgentToolRegistry();
       registry.register(createWebSearchTool(() => provider));
+      let modelSteps = 0;
       const runtime = new AgentRuntime({
         registry,
-        adapterFactory: () =>
-          new MockAdapter(
+        adapterFactory: () => {
+          const adapter = new MockAdapter(
             [
               searchStep,
               {
@@ -8234,7 +8978,18 @@ describe("web attribution runtime guard", function () {
               },
             ],
             capabilities,
-          ),
+          );
+          return {
+            getCapabilities: (request: AgentRuntimeRequest) =>
+              adapter.getCapabilities(request),
+            supportsTools: (request: AgentRuntimeRequest) =>
+              adapter.supportsTools(request),
+            runStep: (params: AgentStepParams) => {
+              modelSteps += 1;
+              return adapter.runStep(params);
+            },
+          };
+        },
       });
       const outcome = await runtime.runTurn({
         request: {
@@ -8250,11 +9005,15 @@ describe("web attribution runtime guard", function () {
 
       assert.equal(outcome.kind, "completed");
       if (outcome.kind !== "completed") return;
-      assert.include(outcome.text, "could not safely attach valid");
+      assert.include(outcome.text, "First uncited claim");
+      assert.equal(modelSteps, 2);
       const run = restoreDb.runs.get(outcome.runId);
-      assert.equal(run?.status, "failed");
-      assert.notInclude(outcome.text, "First uncited claim");
-      assert.notInclude(outcome.text, "Second uncited claim");
+      assert.equal(run?.status, "completed");
+      const anchors = getWebSourceAnchorsFromTrace(
+        (await getAgentRunTrace(outcome.runId)).events,
+      );
+      assert.lengthOf(anchors, 1);
+      assert.equal(anchors[0].placement, "end");
     } finally {
       restoreDb();
     }
@@ -10909,7 +11668,7 @@ describe("run event payloads", function () {
     }
   });
 
-  it("a targeted artifact part finished by an answer citing two of three papers covers those two", async function () {
+  it("a targeted artifact part answered in chat is asked for its document up to the limit, then stays not done", async function () {
     const restoreDb = installMockDb();
     try {
       const events: AgentEvent[] = [];
@@ -10933,7 +11692,11 @@ describe("run event payloads", function () {
           },
           { id: "read-1", name: "paper_read", arguments: {} },
         ]),
-        // The answer delivers the open part itself: no correction.
+        // The answer in chat delivers no artifact part: each answer is
+        // corrected, up to the limit, and the last one is accepted.
+        finalStep(answer),
+        finalStep(answer),
+        finalStep(answer),
         finalStep(answer),
       ]);
       const outcome = await runtime.runTurn({
@@ -10955,11 +11718,9 @@ describe("run event payloads", function () {
         task.taskId.endsWith(":task:summaries"),
       );
       assert.exists(part);
-      assert.equal(part!.status, "completed");
-      assert.deepEqual(part!.doneTargets, ["item:101", "item:102"]);
-      assert.deepEqual(part!.exceptions, [
-        { targets: ["item:103"], reason: OUTCOME_REASONS.notCovered },
-      ]);
+      assert.equal(part!.status, "skipped");
+      assert.equal(part!.reason, OUTCOME_REASONS.notDone);
+      assert.notProperty(part!, "doneTargets");
       assert.deepEqual(ledger!.end, { state: "completed_with_exceptions" });
     } finally {
       restoreDb();
@@ -11002,7 +11763,8 @@ describe("run event payloads", function () {
                 {
                   taskId: "summaries",
                   description: "Write a summary of each paper",
-                  expectedEffect: "artifact",
+                  // A reasoning part: the accepted answer completes it.
+                  expectedEffect: "reasoning",
                   targetIds: ["101", "102"],
                 },
               ],
@@ -11079,6 +11841,126 @@ describe("run event payloads", function () {
         (JSON.parse(String(finals[0].payloadJson)) as { text?: string }).text,
         "The answer.",
       );
+    } finally {
+      restoreDb();
+    }
+  });
+});
+
+describe("outside-search ledger across runs", function () {
+  const originalFetch = globalThis.fetch;
+  beforeEach(function () {
+    clearAgentReadLedger();
+    clearAgentCoverageLedger();
+    clearAgentTranscriptStore();
+    clearAgentToolResultHandleStore();
+  });
+  afterEach(function () {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("ends a run's OpenAlex latch with the run, so the next run's first OpenAlex call reaches the provider", async function () {
+    const restoreDb = installMockDb();
+    const fetched: string[] = [];
+    let status = 429;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetched.push(String(url));
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => ({ results: [] }),
+      } as unknown as Response;
+    }) as typeof fetch;
+    try {
+      const registry = new AgentToolRegistry();
+      const literature = createLiteratureSearchTool({
+        resolveMetadataItem: () => null,
+        getEditableArticleMetadata: () => null,
+        fetchMetadataByIdentifier: async () => null,
+      } as never);
+      const runIds: string[] = [];
+      registry.register({
+        ...literature,
+        execute: (input, context) => {
+          runIds.push(String(context.runId));
+          return literature.execute(input, context);
+        },
+      });
+      const searchCall = (id: string) => ({
+        id,
+        name: "literature_search",
+        arguments: {
+          mode: "search",
+          query: "place cell drift",
+          need: "not_in_scope_or_library",
+          gap: "The library holds no replications.",
+        },
+      });
+      const runSearches = async (conversationKey: number, ids: string[]) => {
+        const steps: AgentModelStep[] = [
+          ...ids.map((id): AgentModelStep => {
+            const call = searchCall(id);
+            return {
+              kind: "tool_calls",
+              calls: [call],
+              assistantMessage: {
+                role: "assistant",
+                content: "",
+                tool_calls: [call],
+              },
+            };
+          }),
+          {
+            kind: "final",
+            text: "Done.",
+            assistantMessage: { role: "assistant", content: "Done." },
+          },
+        ];
+        let step = 0;
+        const runtime = new AgentRuntime({
+          registry,
+          adapterFactory: () => ({
+            getCapabilities: () => ({
+              streaming: false,
+              toolCalls: true,
+              multimodal: false,
+            }),
+            supportsTools: () => true,
+            async runStep(): Promise<AgentModelStep> {
+              return steps[step++];
+            },
+          }),
+        });
+        return runtime.runTurn({
+          request: {
+            conversationKey,
+            mode: "agent",
+            libraryID: 1,
+            userText: "Did other studies replicate place cell drift?",
+            model: "test",
+            apiKey: "test",
+            apiBase: "https://example.invalid",
+          },
+          onEvent: () => undefined,
+        });
+      };
+
+      // Run A: the first OpenAlex call is rate-limited and latches; the
+      // second call in the same run never reaches OpenAlex.
+      await runSearches(991_301, ["call-a1", "call-a2"]);
+      assert.lengthOf(runIds, 2);
+      assert.equal(runIds[0], runIds[1]);
+      assert.lengthOf(fetched, 1);
+      // The runtime clears the run's ledger and latch when the run ends.
+      assert.isUndefined(outsideSearchLatch(runIds[0], "openalex"));
+      assert.equal(outsideSearchCount(runIds[0], "scholarly"), 0);
+
+      // Run B: OpenAlex answers again, and its first call reaches it.
+      status = 200;
+      await runSearches(991_302, ["call-b1"]);
+      assert.lengthOf(runIds, 3);
+      assert.notEqual(runIds[2], runIds[0]);
+      assert.lengthOf(fetched, 2);
     } finally {
       restoreDb();
     }

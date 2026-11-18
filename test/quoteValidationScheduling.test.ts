@@ -136,7 +136,7 @@ describe("quote source warming bounds", function () {
     // apply the bound rather than iterating everything it is handed.
     assert.include(
       sourceEvidenceSource,
-      "MAX_WARMED_QUOTE_SOURCE_PAPERS,\n  );",
+      "Math.min(\n    MAX_WARMED_QUOTE_SOURCE_PAPERS,",
     );
   });
 });

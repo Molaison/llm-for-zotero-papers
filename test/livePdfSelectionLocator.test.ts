@@ -1028,7 +1028,9 @@ describe("citation page cache warming", function () {
     try {
       const first = warmPageTextCacheForAttachment(303);
       const second = warmPageTextCacheForAttachment(303);
-      await Promise.resolve();
+      // The warm first checks Zotero's full-text cache, so the worker call
+      // starts a few microtasks later; let it start before counting.
+      await new Promise((resolve) => setTimeout(resolve, 0));
 
       assert.equal(calls, 1);
       release();
@@ -2449,8 +2451,12 @@ describe("page-native scrollToExactQuoteInReader", function () {
     });
 
     assert.isFalse(result.matched);
+    // Only the complete quote is searched; the empty search after it puts
+    // back the reader's earlier (empty) search.
     assert.isTrue(
-      fixture.dispatched.every((entry) => entry.query === quote),
+      fixture.dispatched
+        .filter((entry) => entry.query)
+        .every((entry) => entry.query === quote),
       JSON.stringify(fixture.dispatched),
     );
   });
@@ -2550,6 +2556,129 @@ describe("page-native scrollToExactQuoteInReader", function () {
     );
   });
 
+  // PDF.js empties and refills the same result list for a new search, so a
+  // second quote with one match on the same page leaves the counts, the page
+  // and the selected match as the first quote left them.
+  it("highlights a second quote whose results look like the first quote's", async function () {
+    const first =
+      "Turnover of dendritic spines predicts the rate at which place fields reorganize.";
+    const second =
+      "These changes were stable across sessions in every recorded animal.";
+    const fixture = createExactFindControllerReader({
+      pageItems: [[{ str: "Opening page." }], [{ str: `${first} ${second}` }]],
+      targetPageIndex: 1,
+    });
+
+    const a = await scrollToExactQuoteInReader(fixture.reader, first, {
+      expectedPageIndex: 1,
+    });
+    const startedAt = Date.now();
+    const b = await scrollToExactQuoteInReader(fixture.reader, second, {
+      expectedPageIndex: 1,
+    });
+
+    assert.equal(a.navigationStatus, "paragraph-selected");
+    assert.equal(b.navigationStatus, "paragraph-selected", JSON.stringify(b));
+    assert.equal(b.queryUsed, second);
+    assert.isBelow(Date.now() - startedAt, 1000, "no wait for a change");
+  });
+
+  it("reports a quote not found at once after an earlier search found nothing", async function () {
+    const quote =
+      "The complete quote aligns to the page but FindController reports no match.";
+    const fixture = createExactFindControllerReader({
+      pageItems: [[{ str: quote }]],
+      targetPageIndex: 0,
+      shouldMatch: false,
+      // The user's own search, which also found nothing, comes back after
+      // each failure.
+      previousQuery: "user's own search",
+    });
+
+    await scrollToExactQuoteInReader(fixture.reader, quote, {
+      expectedPageIndex: 0,
+      verifiedFullSpan: true,
+    });
+    const startedAt = Date.now();
+    const result = await scrollToExactQuoteInReader(fixture.reader, quote, {
+      expectedPageIndex: 0,
+      verifiedFullSpan: true,
+    });
+
+    assert.equal(result.failureStage, "full-match-not-found");
+    assert.isBelow(Date.now() - startedAt, 1000, "no wait for a change");
+  });
+
+  // The reader page cannot read an object made in the plugin's code: such a
+  // request reaches PDF.js empty and clears every result.
+  it("selects a later copy of a repeated quote through the reader's own find bar", async function () {
+    const quote =
+      "The duplicated complete quote remains long enough to identify its intended page occurrence.";
+    const fixture = createExactFindControllerReader({
+      pageItems: [[{ str: `${quote}\nIntervening text.\n${quote}` }]],
+      targetPageIndex: 0,
+      matchCount: 2,
+      readerRealm: true,
+    });
+
+    const result = await scrollToExactQuoteInReader(fixture.reader, quote, {
+      expectedPageIndex: 0,
+      sourceMatchPageOccurrence: 1,
+    });
+
+    assert.equal(
+      result.navigationStatus,
+      "paragraph-selected",
+      JSON.stringify(result),
+    );
+    assert.equal(fixture.findController.selected.matchIdx, 1);
+    assert.deepEqual(
+      fixture.findBarRequests.map((entry) => entry.type),
+      ["", "again"],
+    );
+    assert.isEmpty(fixture.dispatched, "nothing PDF.js cannot read");
+  });
+
+  it("copies a request into the reader page when it has no find field", async function () {
+    const quote =
+      "The duplicated complete quote remains long enough to identify its intended page occurrence.";
+    const fixture = createExactFindControllerReader({
+      pageItems: [[{ str: `${quote}\nIntervening text.\n${quote}` }]],
+      targetPageIndex: 0,
+      matchCount: 2,
+      readerRealm: true,
+    });
+    const app = fixture.reader._window.PDFViewerApplication;
+    const readerWindow = app.findBar.findField.ownerDocument.defaultView;
+    app.appConfig = {
+      mainContainer: { ownerDocument: { defaultView: readerWindow } },
+    };
+    delete app.findBar.findField;
+    delete app.findBar._findField;
+    const globals = globalThis as { cloneInto?: unknown };
+    const previousCloneInto = globals.cloneInto;
+    globals.cloneInto = fixture.cloneInto;
+    try {
+      const result = await scrollToExactQuoteInReader(fixture.reader, quote, {
+        expectedPageIndex: 0,
+        sourceMatchPageOccurrence: 1,
+      });
+
+      assert.equal(
+        result.navigationStatus,
+        "paragraph-selected",
+        JSON.stringify({ result, dispatched: fixture.dispatched }),
+      );
+      assert.equal(fixture.findController.selected.matchIdx, 1);
+      assert.deepEqual(fixture.dispatched, [
+        { type: "", query: quote },
+        { type: "again", query: quote },
+      ]);
+    } finally {
+      globals.cloneInto = previousCloneInto;
+    }
+  });
+
   it("fails closed when a duplicate occurrence is not identified", async function () {
     const quote =
       "The duplicated complete quote remains long enough to require an occurrence.";
@@ -2566,6 +2695,32 @@ describe("page-native scrollToExactQuoteInReader", function () {
     assert.isFalse(result.matched);
     assert.equal(result.failureStage, "full-quote-not-on-page");
     assert.isEmpty(fixture.dispatched);
+  });
+
+  // PDF.js holds a search as its state as soon as it arrives and runs it a
+  // moment later; the search to put back is the one last sent.
+  it("puts back the search PDF.js was last sent, not the last one it ran", async function () {
+    const quote =
+      "The complete quote aligns to the page but FindController unexpectedly reports no match.";
+    const previousQuery = "user's existing find query";
+    const fixture = createExactFindControllerReader({
+      pageItems: [[{ str: quote }]],
+      targetPageIndex: 0,
+      shouldMatch: false,
+      previousQuery,
+    });
+    // An earlier wording of this plugin's, still the last search run.
+    fixture.findController._rawQuery = "an earlier wording of the quote";
+
+    const result = await scrollToExactQuoteInReader(fixture.reader, quote, {
+      expectedPageIndex: 0,
+    });
+
+    assert.isFalse(result.matched);
+    const queries = fixture.dispatched.map((entry) => entry.query);
+    assert.equal(queries[queries.length - 1], previousQuery);
+    assert.notInclude(queries, "an earlier wording of the quote");
+    assert.equal(fixture.findController._state.query, previousQuery);
   });
 
   it("restores the previous FindController query after an exact-match failure", async function () {
@@ -2596,7 +2751,8 @@ describe("page-native scrollToExactQuoteInReader", function () {
         (query) => query !== quote && query !== previousQuery,
       ),
     );
-    assert.equal(fixture.findController._rawQuery, previousQuery);
+    // PDF.js was sent the user's search again (it runs it a moment later).
+    assert.equal(fixture.findController._state.query, previousQuery);
     assert.equal(fixture.getListenerCount(), 0);
   });
 

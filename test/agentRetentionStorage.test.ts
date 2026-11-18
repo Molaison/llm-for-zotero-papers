@@ -10,7 +10,10 @@ import {
   readAgentConversationAnswer,
   replaceAgentTranscriptSegment,
 } from "../src/agent/store/transcriptStore";
-import { buildPortableAgentTranscript } from "../src/agent/context/transcriptCompactor";
+import {
+  buildPortableAgentTranscript,
+  readAgentTaskContext,
+} from "../src/agent/context/transcriptCompactor";
 import type { AgentModelMessage, AgentToolContext } from "../src/agent/types";
 import { installMockDb } from "./helpers/agentRuntimeMockDb";
 
@@ -72,6 +75,46 @@ describe("retention through existing SQLite storage", function () {
     restore();
     db.close();
     clearAgentTranscriptStore();
+  });
+
+  it("execution task context: retains user execution identity through portable serialization and SQLite reload", async function () {
+    const portable = buildPortableAgentTranscript({
+      conversationKey: key,
+      messages: [
+        {
+          role: "user",
+          executionId: "execution-A",
+          content: "User request:\nOriginal A",
+        },
+        {
+          role: "user",
+          executionId: "execution-B",
+          content: "User request:\nOriginal B",
+        },
+        {
+          role: "user",
+          executionId: "execution-A",
+          content: "User request:\nContinue A",
+        },
+      ],
+    });
+    await replaceAgentTranscriptSegment({
+      conversationKey: key,
+      compatibilityKey: "portable-v2",
+      messages: portable.messages,
+    });
+    clearAgentTranscriptStore();
+    const stored = (await loadLatestAgentTranscriptSegment(key))!;
+    assert.deepEqual(
+      stored.messages.map((message) =>
+        message.role === "user" ? message.executionId : undefined,
+      ),
+      ["execution-A", "execution-B", "execution-A"],
+    );
+    const context = readAgentTaskContext(stored.messages, "execution-A")!;
+    assert.include(context, "Original A");
+    assert.include(context, "Continue A");
+    assert.notInclude(context, "Original B");
   });
 
   it("keeps exact sources across compression and restart, pages them losslessly, and binds note payloads before authorization", async function () {

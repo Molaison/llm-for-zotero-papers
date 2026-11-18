@@ -80,9 +80,6 @@ export function createCodexDirectModelReasoningController(params: {
     const stored = getReasoningSelection(selected.model);
     const choices = getCodexDirectReasoningChoices(selected.model);
     const mode = reconcileCodexDirectReasoningChoice(selected.model, stored);
-    if (getCodexDirectCatalogSnapshot().status === "ready" && mode !== stored) {
-      setReasoningSelection(selected.model, mode);
-    }
     return { mode, choices };
   };
 
@@ -162,23 +159,13 @@ export function createCodexDirectModelReasoningController(params: {
     entry: RuntimeModelEntry,
   ): ReasoningConfig | undefined => {
     if (entry.authMode !== "codex_auth") return undefined;
-    return buildCodexReasoningConfig(
-      reconcileCodexDirectReasoningChoice(
-        entry.model,
-        getReasoningSelection(entry.model),
-      ),
-    );
+    return buildCodexReasoningConfig(getReasoningSelection(entry.model));
   };
 
   const getSendReasoning = (): ReasoningConfig | undefined => {
     const entry = getSelectedEntry();
     if (!entry) return undefined;
-    if (entry.catalogAvailability === "saved-unavailable") {
-      throw new Error(
-        "The saved Codex Direct model is unavailable. Select a model from the current catalog before sending.",
-      );
-    }
-    return buildCodexReasoningConfig(resolveReasoningSelection().mode);
+    return buildCodexReasoningConfig(getReasoningSelection(entry.model));
   };
 
   const unsubscribe = subscribeToCodexDirectCatalog(() => {

@@ -198,12 +198,14 @@ export async function openMineruCheckpoint(
         (await hashMineruBytes(new Uint8Array(await io().read(path)))) !== hash
       )
         throw new Error("MinerU checkpoint write verification failed");
-      checkpoint.chunks = checkpoint.chunks.filter(
+      const chunks = checkpoint.chunks.filter(
         (c) => c.index !== chunk.range.index,
       );
-      checkpoint.chunks.push({ index: chunk.range.index, hash });
-      checkpoint.chunks.sort((a, b) => a.index - b.index);
-      await writeIndex(root, checkpoint);
+      chunks.push({ index: chunk.range.index, hash });
+      chunks.sort((a, b) => a.index - b.index);
+      await writeIndex(root, { ...checkpoint, chunks });
+      // Progress describes the durable index, not an index write that failed.
+      checkpoint.chunks = chunks;
     },
   };
 }

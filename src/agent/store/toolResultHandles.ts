@@ -1,3 +1,4 @@
+import { isEphemeralConversationKey } from "../../shared/conversationKeySpace";
 import { fnv1a32 } from "../../utils/fnv1a";
 import { deleteIfPresent, type AgentPurgeDb } from "./inTransactionDelete";
 import {
@@ -213,10 +214,7 @@ export async function hydrateAgentToolResultHandles(
   const expectedGeneration = getConversationWriteGeneration(conversationKey);
   const dbReady = await ensureAgentToolResultHandleStore();
   const db = getDb();
-  if (!dbReady || !db) {
-    hydratedConversations.add(conversationKey);
-    return;
-  }
+  if (!dbReady || !db) return;
   try {
     const rows = (await db.queryAsync(
       `SELECT conversation_key AS conversationKey,
@@ -241,15 +239,18 @@ export async function hydrateAgentToolResultHandles(
     for (const row of rows || []) {
       const record = normalizeRecord(row);
       if (!record) continue;
-      handleStore.set(storeKey(record.conversationKey, record.handle), record);
+      const key = storeKey(record.conversationKey, record.handle);
+      // A local upsert may have completed after this SELECT took its snapshot.
+      if (!handleStore.has(key)) handleStore.set(key, record);
     }
+    hydratedConversations.add(conversationKey);
   } catch (error) {
     logHandleStoreError(
       "LLM Agent: Failed to hydrate tool-result handles",
       error,
     );
+    // A failed read is not hydration: the next access must be able to retry.
   }
-  hydratedConversations.add(conversationKey);
 }
 
 /**
@@ -269,6 +270,14 @@ export async function upsertAgentToolResultHandles(
     if (isConversationKeyRetiredInMemory(record.conversationKey)) continue;
     handleStore.set(storeKey(record.conversationKey, record.handle), record);
   }
+  // A temporary side chat's handles stay in memory only.
+  if (
+    normalized.every((record) =>
+      isEphemeralConversationKey(record.conversationKey),
+    )
+  ) {
+    return false;
+  }
   const dbReady = await ensureAgentToolResultHandleStore();
   const db = getDb();
   if (!dbReady || !db) return false;
@@ -276,6 +285,10 @@ export async function upsertAgentToolResultHandles(
   try {
     for (const record of normalized) {
       if (isConversationKeyRetiredInMemory(record.conversationKey)) {
+        written = false;
+        continue;
+      }
+      if (isEphemeralConversationKey(record.conversationKey)) {
         written = false;
         continue;
       }
@@ -353,6 +366,19 @@ export function hasAgentToolResultHandles(
 export function clearAgentToolResultHandleStore(): void {
   handleStore.clear();
   hydratedConversations.clear();
+}
+
+/** Drop one conversation's in-memory handles; never touches the database. */
+export function clearInMemoryAgentToolResultHandles(
+  conversationKeyValue: number,
+): void {
+  const conversationKey = normalizePositiveInt(conversationKeyValue);
+  if (!conversationKey) return;
+  const prefix = `${conversationKey}:`;
+  for (const key of Array.from(handleStore.keys())) {
+    if (key.startsWith(prefix)) handleStore.delete(key);
+  }
+  hydratedConversations.delete(conversationKey);
 }
 
 export async function clearPersistedAgentToolResultHandles(

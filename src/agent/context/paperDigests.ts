@@ -1,8 +1,9 @@
 /**
  * The per-paper results of a long job: what the turn's reads returned for
  * each paper, kept with the paper's id, its anchors (section, page, quote
- * anchor) and handles to the full results, within the paper's share of the
- * input budget. When the host ends a page it replaces the page's raw reads
+ * anchor) and handles to the full results. Canonical results stay complete;
+ * only the prompt projection uses the paper's share of the input budget.
+ * When the host ends a page it replaces the page's raw reads
  * with these digests, so the final answer sees every paper's results
  * without the context growing with the job.
  *
@@ -21,6 +22,8 @@ export type PaperExcerpt = {
   page?: string;
   /** A quote anchor the answer can cite. */
   quoteId?: string;
+  /** A discontinuous prompt view, never a citable verbatim passage. */
+  truncated?: true;
 };
 
 /** What the reads in a set of tool messages returned for one paper. */
@@ -31,12 +34,14 @@ export type PaperEvidence = {
   noText: boolean;
   /** The tool calls whose results hold it. */
   calls: Array<{ name: string; callId: string }>;
+  /** Legacy stored evidence not recovered from its original handles. */
+  omitted?: number;
 };
 
 export type PaperDigest = {
   itemId: number;
   title?: string;
-  /** In reading order, as many as the paper's share holds. */
+  /** Canonical evidence, or a budgeted projection, in reading order. */
   excerpts: PaperExcerpt[];
   /** Excerpts left out to fit the share; the handles hold them. */
   omitted?: number;
@@ -104,6 +109,8 @@ type Found = {
   itemId: number;
   title?: string;
   excerpt?: PaperExcerpt;
+  /** Model prose is not source text and must never acquire a quote anchor. */
+  summary?: boolean;
   noText?: boolean;
 };
 
@@ -116,6 +123,23 @@ function foundIn(content: Row): Found[] {
       found.push({ itemId: paper.itemId, title: paper.title, ...entry });
   };
   for (const row of rows(content.papers)) {
+    // Full reads return model summaries and exact source chunks separately.
+    // Keep summaries first so long source chunks cannot use up their share.
+    for (const digest of rows(row.digests)) {
+      const body = text(digest.digest);
+      if (body)
+        add(row, {
+          excerpt: {
+            text: body,
+            section: "Model summary (not a verbatim quote)",
+          },
+          summary: true,
+        });
+    }
+    for (const chunk of rows(row.exactEvidence)) {
+      const body = excerpt(chunk, text(chunk.text));
+      if (body) add(row, { excerpt: body });
+    }
     const passages = ["passages", "snippets", "chunks"].flatMap((key) =>
       rows(row[key]),
     );
@@ -150,7 +174,7 @@ function foundIn(content: Row): Found[] {
   // A quote anchor the result offers for a passage it returned.
   const quotes = rows(content.quoteCitations);
   for (const entry of found) {
-    if (!entry.excerpt || entry.excerpt.quoteId) continue;
+    if (!entry.excerpt || entry.excerpt.quoteId || entry.summary) continue;
     const quote = quotes.find(
       (candidate) =>
         positive(candidate.itemId) === entry.itemId &&
@@ -229,8 +253,9 @@ function tokensOf(value: unknown): number {
 
 /**
  * One paper's digest within `maxTokens`: its id, title and handles always,
- * then its excerpts in reading order while they fit; the first one is cut to
- * fit when it alone does not.
+ * then its excerpts in reading order while they fit. An oversized first
+ * excerpt keeps its head and tail, explicitly separated, without a quote id.
+ * Identity is retained even when it alone exceeds maxTokens.
  */
 export function buildPaperDigest(
   itemId: number,
@@ -245,24 +270,52 @@ export function buildPaperDigest(
     ...(evidence.noText ? { noText: true as const } : {}),
     handles: [...handles],
   };
+  const withOmissions = (excerpts: PaperExcerpt[]): PaperDigest => {
+    const omitted =
+      (evidence.omitted || 0) + evidence.excerpts.length - excerpts.length;
+    return { ...digest, excerpts, ...(omitted > 0 ? { omitted } : {}) };
+  };
   for (const [index, candidate] of evidence.excerpts.entries()) {
-    const next = { ...digest, excerpts: [...digest.excerpts, candidate] };
+    const next = withOmissions([...digest.excerpts, candidate]);
     if (tokensOf(next) <= maxTokens) {
       digest.excerpts.push(candidate);
       continue;
     }
     if (index === 0) {
-      const room =
-        maxTokens -
-        tokensOf({ ...digest, excerpts: [{ ...candidate, text: "" }] });
-      const cut = sliceTextToTokenBudget(candidate.text, room - 1).trimEnd();
-      if (cut) digest.excerpts.push({ ...candidate, text: `${cut}…` });
+      const { quoteId: _quoteId, ...location } = candidate;
+      const marker =
+        "\n[... middle omitted; non-verbatim view; original in handle ...]\n";
+      const reversed = Array.from(candidate.text).reverse().join("");
+      const projected = (share: number): PaperExcerpt => {
+        const head = sliceTextToTokenBudget(candidate.text, share).trimEnd();
+        // The estimator weights characters, so reversing code points gives
+        // the same budgeted slice at the other end, including CJK text.
+        const tail = Array.from(sliceTextToTokenBudget(reversed, share))
+          .reverse()
+          .join("")
+          .trimStart();
+        return {
+          ...location,
+          text: `${head}${marker}${tail}`,
+          truncated: true,
+        };
+      };
+      let low = 0;
+      let high = Math.max(0, Math.floor(maxTokens));
+      let clipped: PaperExcerpt | undefined;
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const view = projected(middle);
+        if (tokensOf(withOmissions([view])) <= maxTokens) {
+          if (middle > 0) clipped = view;
+          low = middle + 1;
+        } else high = middle - 1;
+      }
+      if (clipped) digest.excerpts.push(clipped);
     }
     break;
   }
-  const omitted = evidence.excerpts.length - digest.excerpts.length;
-  if (omitted > 0) digest.omitted = omitted;
-  return digest;
+  return withOmissions(digest.excerpts);
 }
 
 /**
@@ -284,9 +337,10 @@ export function readStoredPaperDigests(value: unknown): PaperDigest[] {
                 ? { section: entry.section }
                 : {}),
               ...(typeof entry.page === "string" ? { page: entry.page } : {}),
-              ...(typeof entry.quoteId === "string"
+              ...(typeof entry.quoteId === "string" && entry.truncated !== true
                 ? { quoteId: entry.quoteId }
                 : {}),
+              ...(entry.truncated === true ? { truncated: true as const } : {}),
             },
           ]
         : [],
@@ -313,8 +367,10 @@ function excerptLine(excerpt: PaperExcerpt): string {
   const anchor = [excerpt.section, excerpt.page ? `p. ${excerpt.page}` : ""]
     .filter(Boolean)
     .join(", ");
-  return `  - ${anchor ? `${anchor}: ` : ""}"${excerpt.text}"${
-    excerpt.quoteId ? ` (anchor ${excerpt.quoteId})` : ""
+  return `  - ${anchor ? `${anchor}: ` : ""}${
+    excerpt.truncated ? excerpt.text : `"${excerpt.text}"`
+  }${
+    excerpt.quoteId && !excerpt.truncated ? ` (anchor ${excerpt.quoteId})` : ""
   }`;
 }
 

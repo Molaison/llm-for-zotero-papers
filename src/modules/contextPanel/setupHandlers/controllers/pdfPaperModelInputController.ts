@@ -21,6 +21,8 @@ export type PdfPaperModelInputProfile = {
     | "webchat";
   providerProtocol?: ProviderProtocol;
   inputMode?: ModelInputMode;
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
 } | null;
 
 export type PdfPaperModelInputDeps = {
@@ -130,6 +132,44 @@ export async function resolvePdfModeModelInputs(params: {
     profile?.apiBase,
     profile?.inputMode,
   );
+  // CPR owns first upload and the durable session binding. Keep the upstream
+  // composer while avoiding a second, generic PDF upload.
+  if (
+    !isWebChat &&
+    (profile?.paperRegistry === true || profile?.directWebPdf === true)
+  ) {
+    if (selectedPdfFiles.length) {
+      return fail(
+        deps,
+        pdfSupport,
+        "请在论文来源中选择 PDF；当前会话不支持单独拖入 PDF 文件。",
+      );
+    }
+    if (paperContexts.length && profile?.inputMode === "text_only") {
+      return fail(deps, pdfSupport, FULL_PDF_UNSUPPORTED_MESSAGE);
+    }
+    if (profile?.paperRegistry === true && paperContexts.length > 1) {
+      return fail(
+        deps,
+        pdfSupport,
+        "论文会话仅使用当前论文的 PDF；请移除其他 PDF 后发送。",
+      );
+    }
+    return {
+      ok: true,
+      pdfSupport,
+      selectedFiles: selectedNonPdfFiles,
+      modelFiles: selectedNonPdfFiles,
+      displayPdfPaperAttachments: [],
+      modelPdfPaperAttachments: [],
+      modelSelectedPdfAttachments: [],
+      selectedPdfFiles,
+      selectedNonPdfFiles,
+      pdfPageImageDataUrls: [],
+      pdfUploadSystemMessages: [],
+      localDocuments: [],
+    };
+  }
   let displayPdfPaperAttachments: ChatAttachment[] = [];
   let modelPdfPaperAttachments: ChatAttachment[] = [];
   let modelSelectedPdfAttachments = selectedPdfFiles;

@@ -310,10 +310,20 @@ export function planContextCacheReuse(params: {
     reason,
   });
 
+  // An Anthropic agent request re-sends its fixed prompt and tool list
+  // (~11.5k tokens) every round, above every Claude cache minimum, so its
+  // breakpoints pay off whatever the resource context adds. Other providers
+  // cache a prefix on their own and keep the resource-context gate.
+  const cachesFixedAgentPrefix =
+    capability.provider === "anthropic" &&
+    params.strategy === "agent-stable-resources";
+
   if (capability.kind === "none") return disabled("provider-unsupported");
-  if (!contextText.trim()) return disabled("empty-context");
+  if (!cachesFixedAgentPrefix && !contextText.trim()) {
+    return disabled("empty-context");
+  }
   if (params.mode !== "full") return disabled("retrieval-mode");
-  if (contextTokens < CACHE_MIN_TOKENS)
+  if (!cachesFixedAgentPrefix && contextTokens < CACHE_MIN_TOKENS)
     return disabled("below-cache-threshold");
 
   const { cacheKey, contentHash } = buildContextCacheKey({
@@ -411,10 +421,37 @@ function readNestedNumber(
   obj: Record<string, unknown>,
   key: string,
   nestedKey: string,
-): number {
+): number | undefined {
   const nested = obj[key];
-  if (!nested || typeof nested !== "object" || Array.isArray(nested)) return 0;
-  return readNumber(nested as Record<string, unknown>, nestedKey);
+  if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+    return undefined;
+  }
+  const value = (nested as Record<string, unknown>)[nestedKey];
+  // Missing/invalid telemetry is unknown, not an observed cache miss.
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+/**
+ * The whole prompt of an Anthropic Messages usage payload.
+ *
+ * Anthropic's `input_tokens` counts only the uncached part: the tokens read
+ * from and written to the cache come on top, in their own fields. Every
+ * other provider's prompt count already includes its cached tokens, so this
+ * total is what a prompt count and the context meter mean. A proxy that
+ * reports an OpenAI-style `prompt_tokens` beside the Anthropic fields counts
+ * the cached tokens in already, so that count wins.
+ */
+export function anthropicPromptTokens(usage: unknown): number {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return 0;
+  const u = usage as Record<string, unknown>;
+  return (
+    readNumber(u, "prompt_tokens") ||
+    readNumber(u, "input_tokens") +
+      readNumber(u, "cache_read_input_tokens") +
+      readNumber(u, "cache_creation_input_tokens")
+  );
 }
 
 export function extractContextCacheUsage(usage: unknown): Partial<UsageStats> {
@@ -442,22 +479,27 @@ export function extractContextCacheUsage(usage: unknown): Partial<UsageStats> {
   const anthropicRead = readNumber(u, "cache_read_input_tokens");
   const anthropicWrite = readNumber(u, "cache_creation_input_tokens");
   if (anthropicRead > 0 || anthropicWrite > 0) {
-    const denominator = inputTokens || anthropicRead + anthropicWrite;
+    const total = anthropicPromptTokens(usage);
     return {
       cacheReadTokens: anthropicRead,
       cacheWriteTokens: anthropicWrite,
-      cacheMissTokens: Math.max(0, inputTokens - anthropicRead),
-      cacheHitRatio: denominator > 0 ? anthropicRead / denominator : undefined,
+      cacheMissTokens: Math.max(0, total - anthropicRead),
+      cacheHitRatio: total > 0 ? anthropicRead / total : undefined,
       cacheProvider: "anthropic",
     };
   }
 
+  const openAiCachedFields = [
+    readNestedNumber(u, "prompt_tokens_details", "cached_tokens"),
+    readNestedNumber(u, "input_tokens_details", "cached_tokens"),
+    readNestedNumber(u, "promptTokensDetails", "cachedTokens"),
+    readNestedNumber(u, "inputTokensDetails", "cachedTokens"),
+  ];
+  // Preserve positive-alias precedence, while retaining an explicit valid zero.
   const openAiCached =
-    readNestedNumber(u, "prompt_tokens_details", "cached_tokens") ||
-    readNestedNumber(u, "input_tokens_details", "cached_tokens") ||
-    readNestedNumber(u, "promptTokensDetails", "cachedTokens") ||
-    readNestedNumber(u, "inputTokensDetails", "cachedTokens");
-  if (openAiCached > 0) {
+    openAiCachedFields.find((value) => value !== undefined && value > 0) ??
+    openAiCachedFields.find((value) => value !== undefined);
+  if (openAiCached !== undefined && openAiCached > 0) {
     const denominator = inputTokens || openAiCached;
     return {
       cacheReadTokens: openAiCached,
@@ -505,6 +547,17 @@ export function extractContextCacheUsage(usage: unknown): Partial<UsageStats> {
       cacheMissTokens: Math.max(0, inputTokens - kimiCached),
       cacheHitRatio: denominator > 0 ? kimiCached / denominator : undefined,
       cacheProvider: "kimi",
+    };
+  }
+
+  // A compatibility proxy may include zero-valued OpenAI details beside a
+  // provider's positive counters. Keep the existing provider precedence.
+  if (openAiCached === 0) {
+    return {
+      cacheReadTokens: 0,
+      cacheMissTokens: inputTokens,
+      cacheHitRatio: inputTokens > 0 ? 0 : undefined,
+      cacheProvider: "openai",
     };
   }
 

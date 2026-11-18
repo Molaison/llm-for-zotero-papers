@@ -39,7 +39,9 @@ export type CodexAppServerPreparedTurn = {
   turnInput: CodexAppServerUserInput[];
 };
 
-const MAX_APP_SERVER_IMAGE_FILES = 128;
+// Prepared turns and history can still reference these hash-named files.
+// Do not prune them by count without reference ownership.
+const pendingImageWrites = new Map<string, Promise<void>>();
 
 function getWritableRoot(): string {
   const zotero = Zotero as unknown as {
@@ -97,30 +99,6 @@ async function writeBytes(path: string, data: Uint8Array): Promise<void> {
     return;
   }
   throw new Error("No file write API available for Codex app-server images");
-}
-
-async function listChildren(path: string): Promise<string[]> {
-  const io = getIOUtils();
-  if (io?.getChildren) {
-    try {
-      return await io.getChildren(path);
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-async function removePath(path: string): Promise<void> {
-  const io = getIOUtils();
-  if (io?.remove) {
-    await io.remove(path, { ignoreAbsent: true });
-    return;
-  }
-  const osFile = getOSFile();
-  if (osFile?.remove) {
-    await osFile.remove(path, { ignoreAbsent: true });
-  }
 }
 
 function decodeBase64(base64: string): Uint8Array {
@@ -185,28 +163,22 @@ async function persistDataUrlImage(url: string): Promise<string | null> {
     imageDir,
     `${hash}${mimeTypeToExtension(parsed.mimeType)}`,
   );
-  if (!(await pathExists(imagePath))) {
-    await ensureDir(imageDir);
-    await writeBytes(imagePath, bytes);
-    void prunePersistedDataUrlImages(imagePath);
+  let pending = pendingImageWrites.get(imagePath);
+  if (!pending) {
+    pending = (async () => {
+      if (await pathExists(imagePath)) return;
+      await ensureDir(imageDir);
+      await writeBytes(imagePath, bytes);
+    })();
+    pendingImageWrites.set(imagePath, pending);
+  }
+  try {
+    await pending;
+  } finally {
+    if (pendingImageWrites.get(imagePath) === pending)
+      pendingImageWrites.delete(imagePath);
   }
   return imagePath;
-}
-
-async function prunePersistedDataUrlImages(retainPath: string): Promise<void> {
-  const imageDir = getAppServerImageDir();
-  const entries = await listChildren(imageDir);
-  if (entries.length <= MAX_APP_SERVER_IMAGE_FILES) return;
-
-  const removable = entries.filter((entry) => entry !== retainPath).sort();
-  const excessCount = entries.length - MAX_APP_SERVER_IMAGE_FILES;
-  for (const entry of removable.slice(0, excessCount)) {
-    try {
-      await removePath(entry);
-    } catch {
-      /* ignore cleanup failures */
-    }
-  }
 }
 
 async function buildImageInput(url: string): Promise<CodexAppServerUserInput> {
@@ -614,4 +586,43 @@ export function isCodexAppServerImageInput(
   input: CodexAppServerUserInput,
 ): input is Extract<CodexAppServerUserInput, { type: "image" | "localImage" }> {
   return input.type === "image" || input.type === "localImage";
+}
+
+/**
+ * Puts a Codex turn's past-chat block into its `turn/start` input, as its own
+ * text item, so it stays in the thread right before the question.
+ *
+ * - Turn input (`legacy` false): the block goes first, before the question
+ *   and before any "Zotero context for this turn … User request:" prefix,
+ *   so it never reads as part of the user's request.
+ * - Legacy flattened input (thread/inject_items unsupported; the input holds
+ *   the whole labelled transcript): the block goes right before the latest
+ *   "User:" item, not at the start of the transcript.
+ *
+ * Skill inputs are added after this (applyNativeSkillInputs): structured
+ * skill items go first and fallback $mentions on the last text item, which is
+ * still the question.
+ */
+export function insertCodexPastChatTurnInput(
+  input: CodexAppServerUserInput[],
+  block: string | undefined,
+  options: { legacy: boolean },
+): CodexAppServerUserInput[] {
+  if (!block?.trim()) return input;
+  const item: CodexAppServerUserInput = { type: "text", text: block };
+  if (!options.legacy) return [item, ...input];
+  let latestUserIndex = -1;
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const entry = input[index];
+    if (entry?.type === "text" && entry.text.startsWith("User:\n")) {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return [item, ...input];
+  return [
+    ...input.slice(0, latestUserIndex),
+    item,
+    ...input.slice(latestUserIndex),
+  ];
 }

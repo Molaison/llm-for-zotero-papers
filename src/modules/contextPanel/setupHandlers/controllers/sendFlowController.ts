@@ -17,6 +17,7 @@ import type {
   ResolvedContextSource,
   SelectedTextContext,
   TagContextRef,
+  AttachedConversationRef,
 } from "../../types";
 import type { SelectedTextSource } from "../../types";
 import type { EditLatestTurnMarker, EditLatestTurnResult } from "../../chat";
@@ -36,6 +37,12 @@ import { buildNoteEditingTurnContext } from "../../noteEditing";
 import { resolveNoteEditingScope } from "../../../../services/notes/scope";
 import { readNoteSnapshot } from "../../../../services/notes/noteSnapshot";
 
+import {
+  ANNOTATION_BATCH_MARKER,
+  type AnnotationReplyPacket,
+  type AnnotationReplyRunOptions,
+} from "../../../../services/pdf/annotationReplyService";
+
 type StatusLevel = "ready" | "warning" | "error";
 
 type SelectedProfile = {
@@ -51,6 +58,8 @@ type SelectedProfile = {
     | "copilot_auth"
     | "webchat";
   providerProtocol?: ProviderProtocol;
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
 };
 
 type LatestEditablePair = {
@@ -79,6 +88,17 @@ export type SendFlowOptions =
     };
 
 type SendFlowControllerDeps = {
+  annotationReplies?: {
+    hasSelection: () => boolean;
+    run: (
+      conversationKey: number,
+      options: Pick<
+        AnnotationReplyRunOptions,
+        "signal" | "isActive" | "imageBudget"
+      >,
+      send: (packet: AnnotationReplyPacket) => Promise<unknown>,
+    ) => Promise<void>;
+  };
   body: Element;
   inputBox: HTMLTextAreaElement;
   getItem: () => Zotero.Item | null;
@@ -99,7 +119,15 @@ type SendFlowControllerDeps = {
     conversationKey: number,
     requestId: number,
   ) => boolean;
-  queueFollowUpInput: (text: string) => void;
+  /**
+   * Queues `text` as a follow-up. Returns false when nothing was queued. With
+   * preserveInputDraft the text did not come from the composer, so the queue
+   * must leave the composer draft alone.
+   */
+  queueFollowUpInput: (
+    text: string,
+    options: { preserveInputDraft: boolean },
+  ) => boolean;
   resolveContextSource: () => Promise<ResolvedContextSource | null>;
   closeSlashMenu: () => void;
   closePaperPicker: () => void;
@@ -111,6 +139,9 @@ type SendFlowControllerDeps = {
   getSelectedPaperContexts: (itemId: number) => PaperContextRef[];
   getSelectedCollectionContexts: (itemId: number) => CollectionContextRef[];
   getSelectedTagContexts: (itemId: number) => TagContextRef[];
+  getAttachedConversations: (itemId: number) => AttachedConversationRef[];
+  /** Past chats are one-shot: the composer drops them once a message is sent. */
+  clearAttachedConversations: (itemId: number) => void;
   getFullTextPaperContexts: (
     item: Zotero.Item,
     paperContexts: PaperContextRef[],
@@ -152,6 +183,7 @@ type SendFlowControllerDeps = {
     text: string,
     selectedText: string,
     hasAttachmentContext: boolean,
+    selectedTextContexts?: readonly SelectedTextContext[],
   ) => string;
   buildQuestionWithSelectedTextContexts: (
     selectedTexts: string[],
@@ -234,8 +266,13 @@ type SendFlowControllerDeps = {
   scheduleAttachmentGc: () => void;
   refreshGlobalHistoryHeader: () => void;
   persistDraftInput: () => void;
+  captureDraftRestore?: (conversationKey: number) => (text: string) => void;
   autoLockGlobalChat: () => void;
-  autoUnlockGlobalChat: () => void;
+  autoUnlockGlobalChat: (
+    conversationKey: number,
+    libraryID: number,
+    requestId: number,
+  ) => void;
   onSendSettled?: () => void;
   setStatusMessage?: (message: string, level: StatusLevel) => void;
   editStaleStatusText: string;
@@ -275,11 +312,19 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       (deps.requireCurrentOwnership &&
         !deps.requireCurrentOwnership(item, "send"))
     ) {
+      // The composer arm leaves its draft in place; the preserve arm's text
+      // lives nowhere else, so hand it back.
+      if (options?.preserveInputDraft && options.overrideText.trim()) {
+        options.restoreQueuedInput();
+      }
       return;
     }
 
     const textContextConversationKey = deps.getConversationKey(item);
     const capturedDraft = deps.inputBox.value;
+    const restoreCapturedDraft = deps.captureDraftRestore?.(
+      textContextConversationKey,
+    );
     const draftText = capturedDraft.trim();
     const rawSubmittedText = (options?.overrideText ?? draftText).trim();
     const request = deps.beginRequest(
@@ -288,7 +333,14 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       "Preparing attached context…",
     );
     if (!request) {
-      if (rawSubmittedText) deps.queueFollowUpInput(rawSubmittedText);
+      const preserveInputDraft = Boolean(options?.preserveInputDraft);
+      const queued = rawSubmittedText
+        ? deps.queueFollowUpInput(rawSubmittedText, { preserveInputDraft })
+        : false;
+      // A refused queue (no thread key) drops the text; hand it back.
+      if (!queued && rawSubmittedText && options?.preserveInputDraft) {
+        options.restoreQueuedInput();
+      }
       return;
     }
     // Only a user cancel (or a superseding request) stops preparation.
@@ -314,11 +366,16 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       advancedModelParams: deps.getAdvancedModelParams(
         panelSelectedProfile?.entryId,
       ),
-      activeEditSession: deps.getActiveEditSession(),
+      // A queued drain is always a new turn, never an edit.
+      activeEditSession: options?.preserveInputDraft
+        ? null
+        : deps.getActiveEditSession(),
     };
     const shouldClearDraft = !options?.preserveInputDraft;
     let submittedInputRestored = false;
     let providerDispatchStarted = false;
+    const hasAnnotationReplies =
+      deps.annotationReplies?.hasSelection() || false;
     const restoreSubmittedInput = () => {
       if (providerDispatchStarted || submittedInputRestored) return;
       submittedInputRestored = true;
@@ -326,6 +383,16 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         options.restoreQueuedInput();
         return;
       }
+      if (restoreCapturedDraft) {
+        restoreCapturedDraft(capturedDraft);
+        return;
+      }
+      if (
+        deps.getItem() !== item ||
+        deps.getConversationKey(item) !== textContextConversationKey ||
+        (deps.inputBox.value && deps.inputBox.value !== capturedDraft)
+      )
+        return;
       deps.inputBox.value = capturedDraft;
       deps.persistDraftInput();
       deps.onComposerDraftRestored?.();
@@ -365,6 +432,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         item.id,
       );
       const selectedTagContexts = deps.getSelectedTagContexts(item.id);
+      const attachedConversations = deps.getAttachedConversations(item.id);
       const usesPluginAgentMode =
         (panel.isAgentMode || panel.isClaudeConversationSystem) &&
         !panel.isCodexConversationSystem;
@@ -439,6 +507,28 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         ""
       ).trim();
       const earlyAdvancedParams = panel.advancedModelParams;
+      if (
+        hasAnnotationReplies &&
+        (panel.isAgentMode ||
+          panel.isClaudeConversationSystem ||
+          panel.isCodexConversationSystem ||
+          isWebChat ||
+          panel.activeEditSession ||
+          earlyProfile?.authMode === "codex_app_server" ||
+          deps.isScreenshotUnsupportedModel(
+            earlyModelName,
+            earlyProfile?.providerProtocol,
+            earlyProfile?.authMode,
+            earlyProfile?.apiBase,
+            earlyAdvancedParams?.inputMode,
+          ))
+      ) {
+        deps.setStatusMessage?.(
+          "便签回写请使用支持图片的 Chat / Papers 模型；不支持 Agent、网页、原生代理或编辑重试模式。",
+          "error",
+        );
+        return;
+      }
       const selectedBaseFiles = deps.getSelectedFiles(item.id);
       if (useCodexAttachmentPolicy) {
         const blockedAttachments =
@@ -451,9 +541,18 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           return;
         }
       }
-      const selectedImages = deps
-        .getSelectedImages(item.id)
-        .slice(0, MAX_SELECTED_IMAGES);
+      const allSelectedImages = deps.getSelectedImages(item.id);
+      if (
+        hasAnnotationReplies &&
+        allSelectedImages.length > MAX_SELECTED_IMAGES
+      ) {
+        throw new Error(
+          "便签发送的图片超过输入上限；请缩小选择，不会静默裁剪。",
+        );
+      }
+      const selectedImages = hasAnnotationReplies
+        ? allSelectedImages
+        : allSelectedImages.slice(0, MAX_SELECTED_IMAGES);
       const selectedImageCountForBudget = deps.isScreenshotUnsupportedModel(
         earlyModelName,
         earlyProfile?.providerProtocol,
@@ -525,6 +624,13 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         );
         return;
       }
+      if (isWebChat && attachedConversations.length) {
+        deps.setStatusMessage?.(
+          "Web chat does not support past chats as context. Remove the past chat chip and try again.",
+          "error",
+        );
+        return;
+      }
       const hasPaperComposeState =
         allSelectedPaperContexts.length > 0 ||
         selectedCollectionContexts.length > 0 ||
@@ -537,9 +643,11 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         !selectedPaperContexts.length &&
         !selectedCollectionContexts.length &&
         !selectedTagContexts.length &&
+        !attachedConversations.length &&
         !selectedFiles.length &&
         !localDocuments.length &&
-        !hasImageInputs
+        !hasImageInputs &&
+        !hasAnnotationReplies
       ) {
         return;
       }
@@ -549,7 +657,8 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         localDocuments.length > 0 ||
         selectedPaperContexts.length > 0 ||
         selectedCollectionContexts.length > 0 ||
-        selectedTagContexts.length > 0;
+        selectedTagContexts.length > 0 ||
+        attachedConversations.length > 0;
 
       let resolvedPromptText =
         !text && !primarySelectedText && localDocuments.length
@@ -560,16 +669,21 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
               text,
               primarySelectedText,
               hasNonImageAttachments,
+              selectedContexts,
             );
       if (!resolvedPromptText && hasImageInputs) {
         resolvedPromptText = "Please analyze the attached images.";
+      }
+      if (!resolvedPromptText && hasAnnotationReplies) {
+        resolvedPromptText = "回答所选 PDF 便签。";
       }
       if (!resolvedPromptText) return;
 
       const selectedScopeContextCount =
         selectedPaperContexts.length +
         selectedCollectionContexts.length +
-        selectedTagContexts.length;
+        selectedTagContexts.length +
+        attachedConversations.length;
       if (
         !text &&
         !primarySelectedText &&
@@ -582,7 +696,9 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           ? "Please analyze selected papers."
           : selectedCollectionContexts.length
             ? "Please analyze selected collection."
-            : "Please analyze selected tag.";
+            : selectedTagContexts.length
+              ? "Please analyze selected tag."
+              : "Please review the attached past chats.";
       }
 
       const composedQuestionBase = primarySelectedText
@@ -726,6 +842,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           fullTextPaperContexts,
           selectedCollectionContexts,
           selectedTagContexts,
+          attachedConversations,
           attachments: selectedFiles.length ? selectedFiles : undefined,
           modelAttachments: selectedFiles.length ? modelFiles : undefined,
           localDocuments: localDocuments.length ? localDocuments : undefined,
@@ -779,6 +896,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
           deps.updateFilePreviewPreservingScroll();
         }
         deps.updateImagePreviewPreservingScroll();
+        if (attachedConversations.length) {
+          deps.clearAttachedConversations(item.id);
+          deps.updatePaperPreviewPreservingScroll();
+        }
         if (primarySelectedText) {
           deps.retainPinnedTextState(textContextConversationKey);
           deps.updateSelectedTextPreviewPreservingScroll();
@@ -795,6 +916,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         deps.updateFilePreviewPreservingScroll();
       }
       deps.updateImagePreviewPreservingScroll();
+      if (attachedConversations.length) {
+        deps.clearAttachedConversations(item.id);
+        deps.updatePaperPreviewPreservingScroll();
+      }
       if (primarySelectedText) {
         deps.retainPinnedTextState(textContextConversationKey);
         deps.updateSelectedTextPreviewPreservingScroll();
@@ -818,7 +943,7 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
             : []),
         ]),
       );
-      const questionForSend =
+      let questionForSend =
         selectedProfile?.authMode === "codex_app_server" && forcedSkillIds[0]
           ? prependNativeSkillMention(composedQuestion, forcedSkillIds[0])
           : composedQuestion;
@@ -833,70 +958,98 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       }).activeNoteContext;
       if (!requestIsActive()) return;
       let webchatSendOutcome: "success" | "failed" | "cancelled" | null = null;
-      const sendTask = deps.sendQuestion({
-        body: deps.body,
-        item,
-        requestId: request.requestId,
-        onProviderDispatch: () => {
-          providerDispatchStarted = true;
-        },
-        contextSource,
-        question: questionForSend,
-        images,
-        model: selectedProfile?.model,
-        apiBase: selectedProfile?.apiBase,
-        apiKey: selectedProfile?.apiKey,
-        authMode: selectedProfile?.authMode,
-        providerProtocol: selectedProfile?.providerProtocol,
-        modelEntryId: selectedProfile?.entryId,
-        modelProviderLabel: selectedProfile?.providerLabel,
-        reasoning: selectedReasoning,
-        advanced: advancedParams,
-        displayQuestion,
-        selectedTextContexts: selectedContexts.length
-          ? selectedContexts
-          : undefined,
-        resolvedSelectedTextAnchors: resolvedSelectedTextAnchors.length
-          ? resolvedSelectedTextAnchors
-          : undefined,
-        selectedTexts: selectedTexts.length ? selectedTexts : undefined,
-        selectedTextSources: selectedTexts.length
-          ? selectedTextSources
-          : undefined,
-        selectedTextPaperContexts: selectedTexts.length
-          ? selectedTextPaperContexts
-          : undefined,
-        selectedTextNoteContexts: selectedTexts.length
-          ? selectedTextNoteContexts
-          : undefined,
-        activeNoteContext,
-        conversationKey: textContextConversationKey,
-        conversationKind: activeNoteScope?.conversationKind,
-        paperContexts: selectedPaperContexts,
-        pdfPaperContexts: pdfModePaperContexts,
-        fullTextPaperContexts,
-        selectedCollectionContexts,
-        selectedTagContexts,
-        attachments: selectedFiles.length ? selectedFiles : undefined,
-        modelAttachments: selectedFiles.length ? modelFiles : undefined,
-        localDocuments: localDocuments.length ? localDocuments : undefined,
-        runtimeMode,
-        forcedSkillIds: forcedSkillIds.length ? forcedSkillIds : undefined,
-        pdfUploadSystemMessages: pdfUploadSystemMessages.length
-          ? pdfUploadSystemMessages
-          : undefined,
-        webchatSendPdf,
-        webchatPdfPaperContexts: activeWebChatPdfPaperContexts,
-        webchatForceNewChat,
-        onWebChatSendOutcome: (outcome) => {
-          webchatSendOutcome = outcome;
-        },
-      });
-      if (hasPaperComposeState && !isWebChat) {
-        deps.consumePaperModeState(item.id);
-        deps.retainPaperState(item.id);
-        deps.updatePaperPreviewPreservingScroll();
-      }
+      const send = (packet?: AnnotationReplyPacket) => {
+        const task = deps.sendQuestion({
+          body: deps.body,
+          item,
+          requestId: request.requestId,
+          onProviderDispatch: () => {
+            providerDispatchStarted = true;
+          },
+          contextSource,
+          question: packet
+            ? questionForSend + "\n\n" + packet.prompt
+            : questionForSend,
+          annotationReplyBatchId: packet?.batchId,
+          onAnnotationReplyComplete: packet?.acceptAnswer,
+          images: packet ? [...images, ...packet.pageImages] : images,
+          model: selectedProfile?.model,
+          apiBase: selectedProfile?.apiBase,
+          apiKey: selectedProfile?.apiKey,
+          authMode: selectedProfile?.authMode,
+          providerProtocol: selectedProfile?.providerProtocol,
+          modelEntryId: selectedProfile?.entryId,
+          modelProviderLabel: selectedProfile?.providerLabel,
+          reasoning: selectedReasoning,
+          advanced: advancedParams,
+          displayQuestion: packet
+            ? `${displayQuestion}\n${ANNOTATION_BATCH_MARKER}${packet.batchId}]`
+            : displayQuestion,
+          selectedTextContexts: selectedContexts.length
+            ? selectedContexts
+            : undefined,
+          resolvedSelectedTextAnchors: resolvedSelectedTextAnchors.length
+            ? resolvedSelectedTextAnchors
+            : undefined,
+          selectedTexts: selectedTexts.length ? selectedTexts : undefined,
+          selectedTextSources: selectedTexts.length
+            ? selectedTextSources
+            : undefined,
+          selectedTextPaperContexts: selectedTexts.length
+            ? selectedTextPaperContexts
+            : undefined,
+          selectedTextNoteContexts: selectedTexts.length
+            ? selectedTextNoteContexts
+            : undefined,
+          activeNoteContext,
+          conversationKey: textContextConversationKey,
+          conversationKind: activeNoteScope?.conversationKind,
+          paperContexts: selectedPaperContexts,
+          pdfPaperContexts: pdfModePaperContexts,
+          fullTextPaperContexts,
+          selectedCollectionContexts,
+          selectedTagContexts,
+          attachedConversations: attachedConversations.length
+            ? attachedConversations
+            : undefined,
+          attachments: selectedFiles.length ? selectedFiles : undefined,
+          modelAttachments: selectedFiles.length ? modelFiles : undefined,
+          localDocuments: localDocuments.length ? localDocuments : undefined,
+          runtimeMode,
+          forcedSkillIds: forcedSkillIds.length ? forcedSkillIds : undefined,
+          pdfUploadSystemMessages: pdfUploadSystemMessages.length
+            ? pdfUploadSystemMessages
+            : undefined,
+          webchatSendPdf,
+          webchatPdfPaperContexts: activeWebChatPdfPaperContexts,
+          webchatForceNewChat,
+          onWebChatSendOutcome: (outcome) => {
+            webchatSendOutcome = outcome;
+          },
+        });
+        if (hasPaperComposeState && !isWebChat) {
+          deps.consumePaperModeState(item.id);
+          deps.retainPaperState(item.id);
+          deps.updatePaperPreviewPreservingScroll();
+        }
+        return task;
+      };
+      const sendTask = hasAnnotationReplies
+        ? deps.annotationReplies!.run(
+            textContextConversationKey,
+            {
+              signal: request.signal,
+              isActive: requestIsActive,
+              imageBudget: Math.min(
+                9,
+                (selectedProfile?.paperRegistry === true
+                  ? 9
+                  : MAX_SELECTED_IMAGES) - images.length,
+              ),
+            },
+            send,
+          )
+        : send();
       const win = deps.body.ownerDocument?.defaultView;
       if (win) {
         win.setTimeout(() => {
@@ -953,7 +1106,11 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       if (finished && !providerDispatchStarted) {
         restoreSubmittedInput();
       }
-      deps.autoUnlockGlobalChat();
+      deps.autoUnlockGlobalChat(
+        request.conversationKey,
+        item.libraryID,
+        request.requestId,
+      );
       deps.onSendSettled?.();
     }
   };

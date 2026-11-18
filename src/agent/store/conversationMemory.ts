@@ -1,3 +1,4 @@
+import { isEphemeralConversationKey } from "../../shared/conversationKeySpace";
 import { appLogger } from "../../core/logging";
 import { deleteIfPresent, type AgentPurgeDb } from "./inTransactionDelete";
 import {
@@ -181,15 +182,21 @@ export async function recordAgentTurn(
   const key = normalizeConversationKey(conversationKey);
   if (!key) return;
   if (isConversationKeyRetiredInMemory(key)) return;
+  // A temporary side chat's key (reserved band) is never persisted.
+  if (isEphemeralConversationKey(key)) return;
   const entry = clipTurnMemory(question, toolsUsed, finalAnswer);
-  const existing = store.get(key) ?? [];
+  const expectedGeneration = getConversationWriteGeneration(key);
 
   const dbReady = await ensureConversationMemoryStore();
   const db = getDb();
-  if (isConversationKeyRetiredInMemory(key)) {
-    store.delete(key);
+  if (
+    isConversationKeyRetiredInMemory(key) ||
+    areConversationWritesFrozen(key) ||
+    !isConversationWriteGenerationCurrent(key, expectedGeneration)
+  )
     return;
-  }
+  // Read after preparation: another turn may have appended while we waited.
+  const existing = store.get(key) ?? [];
   existing.push(entry);
   store.set(key, existing.slice(-MAX_MEMORY_TURNS));
   if (!dbReady || !db) return;
@@ -244,6 +251,9 @@ export async function loadAgentTurnMemory(
     ) {
       return [];
     }
+    // A turn recorded during the SELECT is newer than its snapshot.
+    const current = store.get(key);
+    if (current?.length) return current;
     if (turns.length) {
       store.set(key, turns);
     }

@@ -121,27 +121,27 @@ export async function dispatchZoteroItemsToSidebar(
   if ((await target.prepareItemsAsDefaultContextTarget?.()) === false)
     return false;
   const prepared = findTarget();
-  if (!prepared) {
-    await target.afterItemsAsDefaultContextAdded?.({ changed: false }, items);
-    return false;
-  }
-  let result: ContextSelectionActionResult;
-  try {
-    result = await prepared.addItemsAsDefaultContext(items);
-  } catch (error) {
-    // Preparation may have auto-locked a fresh library chat. A failed context
-    // resolution must release that lock even though no result was delivered.
-    await target.afterItemsAsDefaultContextAdded?.({ changed: false }, items);
-    throw error;
-  }
-  if (prepared !== target) {
-    await target.afterItemsAsDefaultContextAdded?.(result, items);
-  }
+  if (!prepared) return false;
+  const result = await prepared.addItemsAsDefaultContext(items);
   await prepared.afterItemsAsDefaultContextAdded?.(result, items);
   return result.changed;
 }
 
 export function registerZoteroItemContextMenu(deps: RegisterMenuDeps): void {
+  // An old version may have left its items behind; a duplicate would run the
+  // old command listener. The toolkit registers into the main window.
+  try {
+    const doc = Zotero.getMainWindow?.()?.document;
+    for (const id of [
+      MENU_SEPARATOR_BEFORE_ID,
+      MENU_ID,
+      MENU_SEPARATOR_AFTER_ID,
+    ]) {
+      doc?.querySelectorAll(`[id="${id}"]`).forEach((el) => el.remove());
+    }
+  } catch {
+    // Nothing to clean up.
+  }
   deps.ztoolkit.Menu?.register?.("item", {
     tag: "menuseparator",
     id: MENU_SEPARATOR_BEFORE_ID,

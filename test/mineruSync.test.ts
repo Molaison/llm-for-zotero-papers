@@ -6,6 +6,7 @@ import {
 } from "../src/utils/mineruConfig";
 import {
   buildManifest,
+  finalizeMineruCacheFiles,
   getMineruItemDir,
   hasCachedMineruMd,
   hasPendingCacheWrite,
@@ -31,6 +32,7 @@ import {
   MINERU_SYNC_METADATA_FILE,
   MINERU_SYNC_PACKAGE_KIND,
   MINERU_SYNC_PACKAGE_VERSION,
+  parseMineruSyncPackageTitleKey,
   publishMineruCachePackageForAttachment,
   repairMineruCaches,
   repairSyncedMineruCacheForAttachment,
@@ -329,6 +331,41 @@ function attachPackage(params: {
   return packageItem;
 }
 
+/**
+ * Independent FNV-1a reference for the package content hash, so a test can
+ * stamp a package with the hash an older plugin version would have written.
+ */
+function referenceContentHash(
+  entries: Record<string, Uint8Array>,
+  options: {
+    includeSourceProvenance: boolean;
+    includeDerivedManifest: boolean;
+  },
+): string {
+  let hash = 0x811c9dc5;
+  const update = (byte: number) => {
+    hash ^= byte & 0xff;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  };
+  for (const path of Object.keys(entries).sort()) {
+    const basename = path.split("/").pop();
+    if (
+      path === MINERU_SYNC_METADATA_FILE ||
+      path === "_llm_sync_state.json" ||
+      (!options.includeDerivedManifest && basename === "manifest.json") ||
+      (!options.includeSourceProvenance &&
+        basename === MINERU_SOURCE_PROVENANCE_FILE)
+    ) {
+      continue;
+    }
+    for (const byte of encoder.encode(path)) update(byte);
+    update(0);
+    for (const byte of entries[path]) update(byte);
+    update(0xff);
+  }
+  return `fnv1a32-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 describe("mineruSync", function () {
   let restoreRetrievalInvalidator: (() => void) | null = null;
 
@@ -378,6 +415,29 @@ describe("mineruSync", function () {
     assert.isFalse(shouldIncludeMineruCachePackageEntry("../full.md"));
     assert.isFalse(shouldIncludeMineruCachePackageEntry("/tmp/full.md"));
     assert.isFalse(shouldIncludeMineruCachePackageEntry("__MACOSX/full.md"));
+  });
+
+  it("reads the source key only from an exact plugin package title", function () {
+    const prefix = MINERU_SYNC_ATTACHMENT_TITLE_PREFIX;
+    assert.equal(
+      parseMineruSyncPackageTitleKey(`${prefix} SRC2KEY9.zip`),
+      "SRC2KEY9",
+    );
+    assert.equal(
+      parseMineruSyncPackageTitleKey(`  ${prefix} OTHERKEY.zip `),
+      "OTHERKEY",
+    );
+    assert.isNull(parseMineruSyncPackageTitleKey("Shared MinerU export.zip"));
+    assert.isNull(parseMineruSyncPackageTitleKey("paper.pdf"));
+    assert.isNull(parseMineruSyncPackageTitleKey(prefix));
+    assert.isNull(parseMineruSyncPackageTitleKey(`${prefix} .zip`));
+    assert.isNull(parseMineruSyncPackageTitleKey(`${prefix} KEY (1).zip`));
+    assert.isNull(parseMineruSyncPackageTitleKey(`${prefix} KEY.zip.bak`));
+    assert.isNull(
+      parseMineruSyncPackageTitleKey(
+        `${prefix.replace("[", "(").replace("]", ")")} KEY.zip`,
+      ),
+    );
   });
 
   it("builds a compact package with full.md, manifest, content_list, and PDF crops", async function () {
@@ -1164,6 +1224,123 @@ describe("mineruSync", function () {
       page: 0,
       section: "Methods",
     });
+  });
+
+  it("restores packages stamped with every content hash formula the plugin has shipped", async function () {
+    const rawMd = "# Intro\n![Fig](images/fig1.png)\n# Results\ncontent";
+    const rawEntries: Record<string, Uint8Array> = {
+      "full.md": bytes(rawMd),
+      "images/fig1.png": bytes([1, 2, 3]),
+      "content_list.json": bytes(
+        JSON.stringify([
+          { type: "text", text_level: 1, text: "Intro", page_idx: 0 },
+          { type: "text", text_level: 1, text: "Results", page_idx: 1 },
+        ]),
+      ),
+      "manifest.json": bytes(JSON.stringify({ sections: [], legacy: true })),
+      [MINERU_SOURCE_PROVENANCE_FILE]: bytes(
+        JSON.stringify({ origin: "parsed" }),
+      ),
+    };
+    // Entries as the extractor finalizes them before hashing.
+    const finalized = finalizeMineruCacheFiles(
+      rawMd,
+      Object.entries(rawEntries)
+        .filter(
+          ([path]) =>
+            path !== "full.md" && shouldIncludeMineruCachePackageEntry(path),
+        )
+        .map(([relativePath, data]) => ({ relativePath, data })),
+    );
+    const finalizedEntries: Record<string, Uint8Array> = {
+      "full.md": bytes(finalized.mdContent),
+    };
+    for (const file of finalized.files) {
+      if (shouldIncludeMineruCachePackageEntry(file.relativePath)) {
+        finalizedEntries[file.relativePath] = file.data;
+      }
+    }
+    finalizedEntries["manifest.json"] = bytes(
+      JSON.stringify(finalized.manifest),
+    );
+
+    const formulaHashes: string[] = [];
+    for (const entries of [finalizedEntries, rawEntries]) {
+      for (const includeSourceProvenance of [false, true]) {
+        for (const includeDerivedManifest of [false, true]) {
+          formulaHashes.push(
+            referenceContentHash(entries, {
+              includeSourceProvenance,
+              includeDerivedManifest,
+            }),
+          );
+        }
+      }
+    }
+    assert.equal(
+      new Set(formulaHashes).size,
+      formulaHashes.length,
+      "each formula gives a distinct hash for this package",
+    );
+
+    const restoreWithStoredHash = async (cacheContentHash: string) => {
+      const io = setupMemoryIO();
+      const items = new Map<number, MockItem>();
+      const parent = createParent();
+      const pdf = createAttachment({
+        id: 181,
+        key: "PDFFORMULA",
+        parentID: parent.id,
+        contentType: "application/pdf",
+        filename: "formula.pdf",
+      });
+      parent.attachmentIDs!.push(pdf.id);
+      items.set(parent.id, parent);
+      items.set(pdf.id, pdf);
+      setupZotero(items, io);
+      setMineruSyncEnabled(true);
+      attachPackage({
+        io,
+        items,
+        parent,
+        id: 182,
+        key: "PKGFORMULA",
+        sourceKey: "PDFFORMULA",
+        bytes: zipSync(
+          {
+            ...rawEntries,
+            [MINERU_SYNC_METADATA_FILE]: bytes(
+              JSON.stringify({
+                kind: MINERU_SYNC_PACKAGE_KIND,
+                version: MINERU_SYNC_PACKAGE_VERSION,
+                createdAt: "2026-06-27T00:00:00.000Z",
+                addonName: "LLM for Zotero",
+                addonVersion: "test",
+                cacheContentHash,
+                sourceAttachmentKey: "PDFFORMULA",
+              }),
+            ),
+          },
+          { level: 6 },
+        ),
+      });
+      const restored = await restoreSyncedMineruCacheForAttachment(
+        pdf as unknown as Zotero.Item,
+      );
+      return { status: restored.status, md: await readCachedMineruMd(pdf.id) };
+    };
+
+    for (const [index, hash] of formulaHashes.entries()) {
+      assert.deepEqual(
+        await restoreWithStoredHash(hash),
+        { status: "restored", md: "# Intro\n# Results\ncontent" },
+        `formula ${index}`,
+      );
+    }
+    assert.equal(
+      (await restoreWithStoredHash("fnv1a32-00000000")).status,
+      "invalid_package",
+    );
   });
 
   it("lazily restores a MinerU cache dir from a synced package and reuses the local cache", async function () {

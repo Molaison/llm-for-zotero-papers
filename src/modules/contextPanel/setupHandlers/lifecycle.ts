@@ -9,12 +9,16 @@ export class PanelLifecycle {
       disposable();
       return () => {};
     }
-    this.disposables.push(disposable);
-    return () => {
-      const index = this.disposables.indexOf(disposable);
+    let active = true;
+    const release = () => {
+      if (!active) return;
+      active = false;
+      const index = this.disposables.indexOf(release);
       if (index >= 0) this.disposables.splice(index, 1);
       disposable();
     };
+    this.disposables.push(release);
+    return release;
   }
 
   dispose(): void {

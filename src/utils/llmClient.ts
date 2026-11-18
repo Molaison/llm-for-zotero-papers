@@ -1,9 +1,30 @@
+import { RequestExecution } from "./requestExecution";
 /**
  * LLM API Client
  *
  * Provides streaming and non-streaming API calls to OpenAI-compatible endpoints.
  */
+import { providerHttpError } from "./retryAfter";
+import { t } from "./i18n";
+import {
+  createResponsesPdfPreparation,
+  explainResponsesPdfRejection,
+  isPdfDataUrl,
+  isResponsesPdfAttachment,
+  type ResponsesInlineFilePart,
+} from "./responsesPdfInputs";
 
+import {
+  describeCprPapersHttpFailure,
+  encodeCprPapersRequestBody,
+  fetchCprPaperHistory,
+  prepareCprPaperRequest,
+} from "./cprPapers";
+import {
+  prepareCprDirectWebRequest,
+  CPR_DIRECT_WEB_UNCERTAIN_MESSAGE,
+} from "./cprDirectWeb";
+import { parseCprChartWidget, type CprChartWidget } from "./cprRichWidgets";
 import { appLogger } from "../core/logging";
 import { config } from "../../package.json";
 import {
@@ -40,6 +61,7 @@ import type {
   RuntimeReasoningOption,
 } from "./reasoningProfiles";
 import type {
+  ChatFileAttachment,
   ChatMessage,
   ImageContent,
   MessageContent,
@@ -51,6 +73,7 @@ import type {
   ModelTurnOutcome,
 } from "../shared/llm";
 export type {
+  ChatFileAttachment,
   ChatMessage,
   ImageContent,
   MessageContent,
@@ -77,6 +100,7 @@ import {
 import {
   getDefaultModelEntry,
   getDefaultProviderGroup,
+  resolveConfiguredModelCapabilities,
   getModelProviderGroups,
   type ModelProviderAuthMode,
 } from "./modelProviders";
@@ -102,7 +126,7 @@ import {
   resolveProviderTransportEndpoint,
 } from "./providerTransport";
 import { parseDataUrl } from "../shared/dataUrl";
-import { readFileRefAsBase64 } from "../agent/model/shared";
+import { encodeBytesBase64, readFileRefAsBase64 } from "../agent/model/shared";
 import { buildMultipartRequest } from "./multipart";
 import {
   applyModelInputTokenCap,
@@ -113,10 +137,15 @@ import {
 } from "./modelInputCap";
 import { resolveProviderCapabilities } from "../providers";
 import {
+  anthropicPromptTokens,
   extractContextCacheUsage,
   type ContextCachePlan,
 } from "../contextCache/manager";
-import type { ModelInputMode, OutputTokenLimitSetting } from "../shared/types";
+import type {
+  ModelInputMode,
+  OutputTokenLimitSetting,
+  PaperContextRef,
+} from "../shared/types";
 import {
   compileReasoningControls,
   ensureModelCapabilities,
@@ -126,6 +155,7 @@ import {
   isReservedRequestKey,
   profileOverrideAppliesTo,
   type ModelProfileOverride,
+  type ModelCapabilityLimits,
   flattenToDotPaths,
   toReasoningProvider,
   type ResolvedModelCapabilities,
@@ -136,10 +166,7 @@ import {
   refreshCodexAuthSession,
   resolveCodexAuthSession,
 } from "../codexAuth/auth";
-import {
-  assertCodexDirectModelAvailable,
-  sanitizeCodexDirectReasoningConfig,
-} from "../codexAuth/modelCatalog";
+import { captureCodexDirectRequestCatalog } from "../codexAuth/modelCatalog";
 import {
   AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
   INPUT_ESTIMATE_SAFETY_RATIO,
@@ -154,14 +181,15 @@ import {
 // Types
 // =============================================================================
 
-export type ChatFileAttachment = {
-  name: string;
-  mimeType?: string;
-  storedPath?: string;
-  contentHash?: string;
-};
-
 export type ChatParams = {
+  /** Zotero item and durable local conversation identity for paperRegistry. */
+  cprPaperItemId?: number;
+  cprPaperSessionId?: string;
+  /** Ordered PDF contexts for the explicit directWebPdf route. */
+  cprPaperContexts?: readonly PaperContextRef[];
+  paperRegistry?: boolean;
+  directWebPdf?: boolean;
+  modelEntryId?: string;
   prompt: string;
   context?: string;
   history?: ChatMessage[];
@@ -188,7 +216,7 @@ export type ChatParams = {
   inputTokenCap?: number;
   /** Optional per-model input capability override. Missing means auto. */
   inputMode?: ModelInputMode;
-  /** Local files to upload and attach when using Responses API */
+  /** Local files to attach when using Responses API (API-key PDFs are inline). */
   attachments?: ChatFileAttachment[];
   /** Extra system-only guidance added to the same request */
   systemMessages?: string[];
@@ -207,6 +235,21 @@ export type ChatParams = {
    */
   profileOverride?: ModelProfileOverride;
 };
+
+function resolveChatRouteCapabilities(params: ChatParams): {
+  paperRegistry: boolean;
+  directWebPdf: boolean;
+} {
+  const configured = resolveConfiguredModelCapabilities({
+    entryId: params.modelEntryId,
+    model: params.model,
+    apiBase: params.apiBase,
+  });
+  return {
+    paperRegistry: params.paperRegistry ?? configured.paperRegistry,
+    directWebPdf: params.directWebPdf ?? configured.directWebPdf,
+  };
+}
 
 export type ContextBudgetPlan = {
   modelLimitTokens: number;
@@ -789,17 +832,28 @@ export async function pollCopilotDeviceAuth(params: {
       throw new Error("Copilot device auth polling aborted");
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, interval);
-      params.signal?.addEventListener(
-        "abort",
-        () => {
+    let removeAbortListener: (() => void) | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          resolve,
+          Math.min(interval, Math.max(0, deadline - Date.now())),
+        );
+        const onAbort = () => {
           clearTimeout(timer);
           reject(new Error("Copilot device auth polling aborted"));
-        },
-        { once: true },
-      );
-    });
+        };
+        params.signal?.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () =>
+          params.signal?.removeEventListener("abort", onAbort);
+      });
+    } finally {
+      removeAbortListener?.();
+    }
+    if (params.signal?.aborted) {
+      throw new Error("Copilot device auth polling aborted");
+    }
+    if (Date.now() >= deadline) break;
 
     const response = await getFetch()(COPILOT_OAUTH_TOKEN_URL, {
       method: "POST",
@@ -819,6 +873,10 @@ export async function pollCopilotDeviceAuth(params: {
       access_token?: string;
       error?: string;
     };
+    if (params.signal?.aborted) {
+      throw new Error("Copilot device auth polling aborted");
+    }
+    if (Date.now() >= deadline) break;
 
     if (payload.access_token) {
       return payload.access_token;
@@ -1059,6 +1117,152 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw createAbortError();
   }
+}
+
+type ResponsesPreparedFilePart =
+  | ResponsesInlineFilePart
+  | { type: "input_file"; file_id: string };
+
+async function prepareResponsesAttachments(
+  params: ChatParams & {
+    apiBase: string;
+    apiKey: string;
+    authMode: ModelProviderAuthMode;
+    model: string;
+    providerProtocol: ProviderProtocol;
+    messages: ChatMessage[];
+  },
+): Promise<{
+  responseFileIds: string[];
+  responseFilePartsByMessage: Map<number, ResponsesPreparedFilePart[]>;
+  allowAutomaticRetry: boolean;
+}> {
+  throwIfAborted(params.signal);
+  const responseFilePartsByMessage = new Map<
+    number,
+    ResponsesPreparedFilePart[]
+  >();
+  if (
+    params.providerProtocol !== "responses_api" ||
+    params.authMode !== "api_key"
+  ) {
+    const responseFileIds =
+      (params.providerProtocol === "responses_api" ||
+        params.providerProtocol === "codex_responses") &&
+      providerSupportsFileUploads(params.apiBase)
+        ? await uploadFilesForResponses({
+            apiBase: params.apiBase,
+            apiKey: params.apiKey,
+            attachments: params.attachments,
+            signal: params.signal,
+          })
+        : [];
+    return {
+      responseFileIds,
+      responseFilePartsByMessage,
+      allowAutomaticRetry: true,
+    };
+  }
+
+  const pdf = createResponsesPdfPreparation({
+    model: params.model,
+    apiBase: params.apiBase,
+    protocol: params.providerProtocol,
+    authMode: params.authMode,
+    inputMode: params.inputMode,
+    signal: params.signal,
+    readBytes: readLocalFileBytes,
+    encodeBase64: encodeBytesBase64,
+  });
+  // Only the retained, capped messages participate. No identity survives a request.
+  const seenPdfs = new Set<string>();
+  const latestUserIndex = params.messages
+    .map((message) => message.role)
+    .lastIndexOf("user");
+  for (let index = 0; index < params.messages.length; index++) {
+    const message = params.messages[index];
+    if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === "image_url" && isPdfDataUrl(part.image_url.url)) {
+          try {
+            pdf.includeDataUrl(part.image_url.url);
+          } catch (error) {
+            throw explainResponsesPdfRejection(error);
+          }
+        }
+      }
+    }
+    if (message.role !== "user") continue;
+    const attachments = [
+      ...(message.fileAttachments || []),
+      ...(index === latestUserIndex ? params.attachments || [] : []),
+    ];
+    const parts: ResponsesPreparedFilePart[] = [];
+    for (const attachment of attachments) {
+      if (isResponsesPdfAttachment(attachment)) {
+        // One content identity namespace; never equate files by a path alias.
+        const storedHash = attachment.contentHash?.trim().toLowerCase();
+        const hash =
+          storedHash && /^[a-f0-9]{64}$/.test(storedHash) ? storedHash : "";
+        const identity = (contentHash: string) =>
+          JSON.stringify([contentHash, attachment.name.trim()]);
+        if (hash && seenPdfs.has(identity(hash))) continue;
+        try {
+          const part = hash
+            ? await pdf.prepareFile(attachment)
+            : await pdf.prepareFile(attachment, async (bytes) => {
+                const subtle = globalThis.crypto?.subtle;
+                if (!subtle?.digest) {
+                  throw new Error("WebCrypto subtle.digest unavailable");
+                }
+                const digest = await subtle.digest(
+                  "SHA-256",
+                  bytes.buffer.slice(
+                    bytes.byteOffset,
+                    bytes.byteOffset + bytes.byteLength,
+                  ) as ArrayBuffer,
+                );
+                const contentHash = Array.from(
+                  new Uint8Array(digest),
+                  (value) => value.toString(16).padStart(2, "0"),
+                ).join("");
+                const key = identity(contentHash);
+                if (seenPdfs.has(key)) return false;
+                seenPdfs.add(key);
+                return true;
+              });
+          if (part) parts.push(part);
+        } catch (error) {
+          throw explainResponsesPdfRejection(error);
+        }
+        if (hash) seenPdfs.add(identity(hash));
+      } else if (!providerSupportsFileUploads(params.apiBase)) {
+        // Compatible Responses declares PDF support, not arbitrary /files.
+        parts.push(await pdf.prepareFile(attachment));
+      } else {
+        throwIfAborted(params.signal);
+        // Keep official non-PDF upload/cache behavior and mixed file order.
+        const fileIds = await uploadFilesForResponses({
+          apiBase: params.apiBase,
+          apiKey: params.apiKey,
+          attachments: [attachment],
+          signal: params.signal,
+        });
+        throwIfAborted(params.signal);
+        if (fileIds.length !== 1) {
+          throw new Error("File upload succeeded but no file ID was returned");
+        }
+        parts.push({ type: "input_file", file_id: fileIds[0] });
+      }
+    }
+    if (parts.length) responseFilePartsByMessage.set(index, parts);
+  }
+  throwIfAborted(params.signal);
+  return {
+    responseFileIds: [],
+    responseFilePartsByMessage,
+    allowAutomaticRetry: !pdf.hasPdf,
+  };
 }
 
 function normalizeUploadableAttachments(
@@ -1351,8 +1555,14 @@ function stripUnsupportedImageContent(
   if (capabilities.images) return messages;
   return messages.map((message) => {
     if (typeof message.content === "string") return message;
+    const retainedPdfParts = message.content.filter(
+      (part) =>
+        part.type === "image_url" &&
+        isPdfDataUrl(part.image_url.url) &&
+        capabilities.pdf === "native",
+    );
     const omittedImageCount = message.content.filter(
-      (part) => part.type === "image_url",
+      (part) => part.type === "image_url" && !retainedPdfParts.includes(part),
     ).length;
     const textParts = message.content
       .filter((part): part is TextContent => part.type === "text")
@@ -1364,6 +1574,19 @@ function stripUnsupportedImageContent(
             omittedImageCount === 1 ? "" : "s"
           } omitted because ${params.modelName || "the selected model"} does not support image input.]`
         : "";
+    if (retainedPdfParts.length) {
+      return {
+        ...message,
+        content: [
+          ...message.content.filter(
+            (part) => part.type === "text" || retainedPdfParts.includes(part),
+          ),
+          ...(omittedNotice
+            ? [{ type: "text" as const, text: omittedNotice }]
+            : []),
+        ],
+      };
+    }
     const content = [...textParts, omittedNotice].filter(Boolean).join("\n\n");
     return {
       ...message,
@@ -1372,7 +1595,10 @@ function stripUnsupportedImageContent(
   });
 }
 
-export function prepareChatRequest(params: ChatParams): PreparedChatRequest {
+export function prepareChatRequest(
+  params: ChatParams,
+  requestModelLimits?: ModelCapabilityLimits,
+): PreparedChatRequest {
   const { apiBase, apiKey, authMode, model, systemPrompt, providerProtocol } =
     getApiConfig({
       apiBase: params.apiBase,
@@ -1381,16 +1607,43 @@ export function prepareChatRequest(params: ChatParams): PreparedChatRequest {
       model: params.model,
       providerProtocol: params.providerProtocol,
     });
-  const rawMessages = stripUnsupportedImageContent(
-    buildMessages(params, systemPrompt),
-    {
-      modelName: model,
-      apiBase,
-      authMode,
-      providerProtocol,
-      inputMode: params.inputMode,
-    },
+  const builtMessages = buildMessages(params, systemPrompt).map((message) =>
+    providerProtocol === "responses_api" && authMode === "api_key"
+      ? message
+      : { role: message.role, content: message.content },
   );
+  if (
+    providerProtocol === "responses_api" &&
+    authMode === "api_key" &&
+    builtMessages.some(
+      (message) =>
+        Array.isArray(message.content) &&
+        message.content.some(
+          (part) =>
+            part.type === "image_url" && isPdfDataUrl(part.image_url.url),
+        ),
+    ) &&
+    resolveProviderCapabilities({
+      model,
+      apiBase,
+      protocol: providerProtocol,
+      authMode,
+      inputMode: params.inputMode,
+    }).pdf !== "native"
+  ) {
+    throw new Error(
+      t(
+        "PDF input is not confirmed for this model and provider; no request was sent.",
+      ),
+    );
+  }
+  const rawMessages = stripUnsupportedImageContent(builtMessages, {
+    modelName: model,
+    apiBase,
+    authMode,
+    providerProtocol,
+    inputMode: params.inputMode,
+  });
   const inputCap = applyModelInputTokenCap(
     rawMessages,
     model,
@@ -1400,6 +1653,7 @@ export function prepareChatRequest(params: ChatParams): PreparedChatRequest {
       apiBase,
       protocol: providerProtocol,
       authMode,
+      requestModelLimits,
       profileOverride: params.profileOverride,
     },
   );
@@ -1546,9 +1800,29 @@ export function estimateAvailableContextBudget(params: {
   };
 }
 
+/** Read-only registry history lookup, using the same transport as paper turns. */
+export function loadCprPaperHistory(
+  params: Omit<
+    Parameters<typeof fetchCprPaperHistory>[0],
+    "fetchFn" | "readBytes"
+  >,
+) {
+  return fetchCprPaperHistory({
+    ...params,
+    fetchFn: getFetch(),
+    readBytes: readLocalFileBytes,
+  });
+}
+
 /** Get fetch function from Zotero global */
-function getFetch(): typeof fetch {
-  return ztoolkit.getGlobal("fetch") as typeof fetch;
+function getFetch(signal?: AbortSignal): typeof fetch {
+  const fetchFn = ztoolkit.getGlobal("fetch") as typeof fetch;
+  if (!signal) return fetchFn;
+  return (input, init) => {
+    // Session-header resolution may await before invoking fetch.
+    throwIfAborted(signal);
+    return fetchFn(input, init);
+  };
 }
 
 function normalizeStreamText(value: unknown): string {
@@ -2053,7 +2327,10 @@ function mergeSystemMessagesForChatPayload(
 function buildResponsesInput(
   messages: ChatMessage[],
   responseFileIds?: string[],
-  options?: { preserveSystemMessages?: boolean },
+  options?: {
+    preserveSystemMessages?: boolean;
+    filePartsByMessage?: ReadonlyMap<number, ResponsesPreparedFilePart[]>;
+  },
 ) {
   const preserveSystemMessages = options?.preserveSystemMessages === true;
   const instructionsParts: string[] = [];
@@ -2073,6 +2350,20 @@ function buildResponsesInput(
         .map((entry) => entry.trim())
         .filter(Boolean)
     : [];
+  const currentFiles: ResponsesContentPart[] = [
+    ...normalizedFileIds.map((file_id) => ({
+      type: "input_file" as const,
+      file_id,
+    })),
+  ];
+  const latestUserIndex = messages
+    .map((message) => message.role)
+    .lastIndexOf("user");
+  if (currentFiles.length && latestUserIndex < 0) {
+    throw new Error(
+      t("Cannot attach PDF without a user input; no request was sent."),
+    );
+  }
 
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
@@ -2081,22 +2372,21 @@ function buildResponsesInput(
       if (text) instructionsParts.push(text);
       continue;
     }
-    const appendFilesToMessage =
-      message.role === "user" &&
-      index === messages.length - 1 &&
-      normalizedFileIds.length > 0;
+    const messageFiles =
+      message.role === "user"
+        ? [
+            ...(index === latestUserIndex ? currentFiles : []),
+            ...(options?.filePartsByMessage?.get(index) || []),
+          ]
+        : [];
+    const appendFilesToMessage = messageFiles.length > 0;
 
     if (typeof message.content === "string") {
       if (appendFilesToMessage) {
         const contentParts: ResponsesContentPart[] = [
           { type: "input_text", text: message.content },
         ];
-        for (const fileId of normalizedFileIds) {
-          contentParts.push({
-            type: "input_file",
-            file_id: fileId,
-          });
-        }
+        contentParts.push(...messageFiles);
         input.push({
           type: "message",
           role: message.role,
@@ -2119,9 +2409,9 @@ function buildResponsesInput(
       }
       const url = part.image_url.url;
       // Legacy PDF data URIs from older history entries should be sent as
-      // inline input_file, not input_image. New PDF delivery paths should use
-      // provider-native files, provider upload, or rendered page images.
-      if (url.startsWith("data:application/pdf;base64,")) {
+      // inline input_file, not input_image. Current attachments are appended
+      // separately below, retaining their original filenames.
+      if (isPdfDataUrl(url)) {
         pdfCounter += 1;
         return {
           type: "input_file" as const,
@@ -2136,12 +2426,7 @@ function buildResponsesInput(
       };
     });
     if (appendFilesToMessage) {
-      for (const fileId of normalizedFileIds) {
-        contentParts.push({
-          type: "input_file",
-          file_id: fileId,
-        });
-      }
+      contentParts.push(...messageFiles);
     }
 
     input.push({
@@ -2304,6 +2589,39 @@ export function stripReservedRequestKeys(
 }
 
 function buildReasoningControlPayload(
+  reasoning: ReasoningConfig | undefined,
+  useResponses: boolean,
+  modelName?: string,
+  apiBase?: string,
+  providerProtocol?: ProviderProtocol,
+  options?: ReasoningPayloadOptions,
+): { extra: Record<string, unknown>; omitTemperature: boolean } {
+  const payload = buildProviderReasoningControlPayload(
+    reasoning,
+    useResponses,
+    modelName,
+    apiBase,
+    providerProtocol,
+    options,
+  );
+  // One owner: a model whose registry entry forbids a temperature never gets
+  // one, whichever provider branch built the reasoning controls.
+  if (payload.omitTemperature) return payload;
+  const capabilities = getModelCapabilities({
+    provider: reasoning?.provider,
+    model: modelName || "",
+    apiBase,
+    protocol:
+      providerProtocol ||
+      (useResponses ? "responses_api" : "openai_chat_compat"),
+    profileOverride: options?.profileOverride,
+  });
+  return capabilities.sampling.temperature !== "configurable"
+    ? { ...payload, omitTemperature: true }
+    : payload;
+}
+
+function buildProviderReasoningControlPayload(
   reasoning: ReasoningConfig | undefined,
   useResponses: boolean,
   modelName?: string,
@@ -2742,7 +3060,8 @@ async function parseAnthropicStreamResponse(
             parsed.message?.usage &&
             onUsage
           ) {
-            const inputTokens = parsed.message.usage.input_tokens ?? 0;
+            // input_tokens leaves out the cached tokens; the prompt is all three.
+            const inputTokens = anthropicPromptTokens(parsed.message.usage);
             const outputTokens = parsed.message.usage.output_tokens ?? 0;
             const totalTokens = inputTokens + outputTokens;
             if (inputTokens > 0 || totalTokens > 0) {
@@ -2996,6 +3315,7 @@ async function parseGeminiNativeStreamResponse(
             usageMetadata?: {
               promptTokenCount?: number;
               candidatesTokenCount?: number;
+              thoughtsTokenCount?: number;
               totalTokenCount?: number;
               cachedContentTokenCount?: number;
             };
@@ -3027,7 +3347,8 @@ async function parseGeminiNativeStreamResponse(
               onUsage({
                 promptTokens: parsed.usageMetadata.promptTokenCount ?? 0,
                 completionTokens:
-                  parsed.usageMetadata.candidatesTokenCount ?? 0,
+                  (parsed.usageMetadata.candidatesTokenCount ?? 0) +
+                  (parsed.usageMetadata.thoughtsTokenCount ?? 0),
                 totalTokens: total,
                 ...cacheUsage,
                 contextTokens: parsed.usageMetadata.promptTokenCount ?? 0,
@@ -3298,7 +3619,9 @@ function createChatPayloadBuilder(params: {
   messages: ChatMessage[];
   useResponses: boolean;
   responseFileIds?: string[];
+  responseFilePartsByMessage?: ReadonlyMap<number, ResponsesPreparedFilePart[]>;
   authMode: ModelProviderAuthMode;
+  codexCatalog: ReturnType<typeof captureCodexDirectRequestCatalog> | undefined;
   apiBase: string;
   providerProtocol?: ProviderProtocol;
   effectiveTemperature: number;
@@ -3316,6 +3639,7 @@ function createChatPayloadBuilder(params: {
     messages,
     useResponses,
     responseFileIds,
+    responseFilePartsByMessage,
     authMode,
     apiBase,
     providerProtocol,
@@ -3331,15 +3655,17 @@ function createChatPayloadBuilder(params: {
     const responsesInput = useResponses
       ? buildResponsesInput(messages, responseFileIds, {
           preserveSystemMessages: isGrokApiBase(apiBase),
+          filePartsByMessage: responseFilePartsByMessage,
         })
       : null;
     const chatMessages = useResponses
       ? messages
       : mergeSystemMessagesForChatPayload(messages);
     if (useResponses && isCodexAuth && responsesInput) {
-      const codexReasoningEffort = sanitizeCodexDirectReasoningConfig(
-        model,
-        reasoningOverride,
+      const codexReasoningEffort = (
+        params.codexCatalog
+          ? params.codexCatalog.sanitizeReasoning(model, reasoningOverride)
+          : reasoningOverride
       )?.effort;
       const codexInstructionsParts = [
         responsesInput.instructions || "You are a helpful assistant.",
@@ -3706,31 +4032,42 @@ async function refreshCopilotAuthState(
 
 async function postWithTemperatureFallback(params: {
   url: string;
-  auth: RequestAuthState;
+  execution: RequestExecution<{
+    auth: RequestAuthState;
+    reasoning: ReasoningSelection | undefined;
+  }>;
   payload: Record<string, unknown>;
   signal?: AbortSignal;
   headers?: Record<string, string>;
   scope: ProviderRequestScope;
+  allowAutomaticRetry?: boolean;
 }) {
+  const execution = params.execution;
+  execution.assertActive();
   const policyKey = getTemperaturePolicyKey(params.url, params.payload);
   const hasTemperature = Object.prototype.hasOwnProperty.call(
     params.payload,
     "temperature",
   );
-  const send = (bodyPayload: Record<string, unknown>, auth: RequestAuthState) =>
-    sendProviderRequest({
-      url: params.url,
-      scope: params.scope,
-      fetchFn: getFetch(),
-      init: {
-        method: "POST",
-        headers:
-          params.headers ??
-          buildAuthHeaders(auth.token, auth.mode, auth.codex?.accountId),
-        body: JSON.stringify(bodyPayload),
-        signal: params.signal,
-      },
-    });
+  const send = (bodyPayload: Record<string, unknown>) => {
+    execution.assertActive();
+    const auth = execution.context.auth;
+    return execution.wait(() =>
+      sendProviderRequest({
+        url: params.url,
+        scope: params.scope,
+        fetchFn: getFetch(params.signal),
+        init: {
+          method: "POST",
+          headers:
+            params.headers ??
+            buildAuthHeaders(auth.token, auth.mode, auth.codex?.accountId),
+          body: JSON.stringify(bodyPayload),
+          signal: params.signal,
+        },
+      }),
+    );
+  };
 
   let requestPayload = params.payload;
   const cachedPolicy = temperaturePolicyCache.get(policyKey);
@@ -3747,23 +4084,32 @@ async function postWithTemperatureFallback(params: {
     );
   }
 
-  let authState = params.auth;
-  let res = await send(requestPayload, authState);
+  let res = await send(requestPayload);
   if (res.status === 401) {
-    if (authState.mode === "codex_auth" && authState.codex?.refreshToken) {
-      authState = await refreshCodexAuthState(authState, params.signal);
-      res = await send(requestPayload, authState);
-    } else if (
-      authState.mode === "copilot_auth" &&
-      authState.copilot?.githubToken
+    if (
+      execution.context.auth.mode === "codex_auth" &&
+      execution.context.auth.codex?.refreshToken
     ) {
-      authState = await refreshCopilotAuthState(authState, params.signal);
-      res = await send(requestPayload, authState);
+      execution.context.auth = await execution.wait(() =>
+        refreshCodexAuthState(execution.context.auth, params.signal),
+      );
+      res = await send(requestPayload);
+    } else if (
+      execution.context.auth.mode === "copilot_auth" &&
+      execution.context.auth.copilot?.githubToken
+    ) {
+      execution.context.auth = await execution.wait(() =>
+        refreshCopilotAuthState(execution.context.auth, params.signal),
+      );
+      res = await send(requestPayload);
     }
   }
   if (res.ok) return res;
 
-  const firstErr = await res.text();
+  const firstErr = await execution.wait(() => res.text());
+  if (params.allowAutomaticRetry === false) {
+    throw providerHttpError(res, params.url, firstErr);
+  }
   const recoveryPolicy = hasTemperature
     ? getTemperatureRecoveryPolicy(res.status, firstErr)
     : null;
@@ -3772,27 +4118,32 @@ async function postWithTemperatureFallback(params: {
       params.payload,
       recoveryPolicy,
     );
-    res = await send(fallbackPayload, authState);
+    res = await send(fallbackPayload);
     if (res.status === 401) {
-      if (authState.mode === "codex_auth" && authState.codex?.refreshToken) {
-        authState = await refreshCodexAuthState(authState, params.signal);
-        res = await send(fallbackPayload, authState);
-      } else if (
-        authState.mode === "copilot_auth" &&
-        authState.copilot?.githubToken
+      if (
+        execution.context.auth.mode === "codex_auth" &&
+        execution.context.auth.codex?.refreshToken
       ) {
-        authState = await refreshCopilotAuthState(authState, params.signal);
-        res = await send(fallbackPayload, authState);
+        execution.context.auth = await execution.wait(() =>
+          refreshCodexAuthState(execution.context.auth, params.signal),
+        );
+        res = await send(fallbackPayload);
+      } else if (
+        execution.context.auth.mode === "copilot_auth" &&
+        execution.context.auth.copilot?.githubToken
+      ) {
+        execution.context.auth = await execution.wait(() =>
+          refreshCopilotAuthState(execution.context.auth, params.signal),
+        );
+        res = await send(fallbackPayload);
       }
     }
     if (res.ok) {
       temperaturePolicyCache.set(policyKey, recoveryPolicy);
       return res;
     }
-    const secondErr = await res.text();
-    throw new Error(
-      `${res.status} ${res.statusText} (${params.url}) - ${secondErr}`,
-    );
+    const secondErr = await execution.wait(() => res.text());
+    throw providerHttpError(res, params.url, secondErr);
   }
   const retryCapKey = findOutputCapKey(requestPayload);
   const capRecovery = retryCapKey
@@ -3816,22 +4167,18 @@ async function postWithTemperatureFallback(params: {
       recovery: capRecovery,
       error: firstErr,
     });
-    res = await send(fallbackPayload, authState);
+    res = await send(fallbackPayload);
     if (res.ok) {
       if (capRecovery.scope === "endpoint") {
         outputCapRecoveryCache.set(policyKey, capRecovery);
       }
       return res;
     }
-    const secondErr = await res.text();
-    throw new Error(
-      `${res.status} ${res.statusText} (${params.url}) - ${secondErr}`,
-    );
+    const secondErr = await execution.wait(() => res.text());
+    throw providerHttpError(res, params.url, secondErr);
   }
 
-  throw new Error(
-    `${res.status} ${res.statusText} (${params.url}) - ${firstErr}`,
-  );
+  throw providerHttpError(res, params.url, firstErr);
 }
 
 export function parseStatusFromErrorMessage(message: string): number | null {
@@ -3930,58 +4277,73 @@ export async function postWithReasoningFallback(params: {
   }) => ReasoningSelection | undefined | null;
   signal?: AbortSignal;
   headers?: Record<string, string>;
+  /** Raw PDF turns must fail visibly rather than silently resubmit. */
+  allowAutomaticRetry?: boolean;
 }) {
-  let reasoningSelection = params.initialReasoning;
-  let retries = 0;
-  const maxRetries = 2;
-  let lastError: unknown;
-  const attemptedSelections = new Set<string>([
-    getReasoningSelectionKey(reasoningSelection),
-  ]);
+  const execution = new RequestExecution(
+    {
+      auth: { ...params.auth },
+      reasoning: params.initialReasoning,
+    },
+    params.signal,
+  );
+  return execution.run(async () => {
+    let retries = 0;
+    const maxRetries = 2;
+    let lastError: unknown;
+    const attemptedSelections = new Set<string>([
+      getReasoningSelectionKey(execution.context.reasoning),
+    ]);
 
-  while (retries <= maxRetries) {
-    const payload = params.buildPayload(reasoningSelection);
-    try {
-      return await postWithTemperatureFallback({
-        url: params.url,
-        scope: params.scope,
-        auth: params.auth,
-        payload,
-        signal: params.signal,
-        headers: params.headers,
-      });
-    } catch (err) {
-      lastError = err;
-      const message = err instanceof Error ? err.message : String(err);
-      if (!isReasoningErrorMessage(message)) {
-        throw err;
+    while (retries <= maxRetries) {
+      execution.assertActive();
+      const payload = params.buildPayload(execution.context.reasoning);
+      try {
+        return await postWithTemperatureFallback({
+          url: params.url,
+          scope: params.scope,
+          execution,
+          payload,
+          signal: params.signal,
+          headers: params.headers,
+          allowAutomaticRetry: params.allowAutomaticRetry,
+        });
+      } catch (err) {
+        execution.assertActive();
+        if (params.allowAutomaticRetry === false)
+          throw explainResponsesPdfRejection(err);
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (!isReasoningErrorMessage(message)) {
+          throw err;
+        }
+        const recovered = (
+          params.getRecoverySelection || getReasoningRecoverySelection
+        )({
+          currentReasoning: execution.context.reasoning,
+          modelName: params.modelName,
+        });
+        if (recovered === null) {
+          throw err;
+        }
+        const nextKey = getReasoningSelectionKey(recovered);
+        if (attemptedSelections.has(nextKey)) {
+          throw err;
+        }
+        appLogger.debug("LLM: Retrying after reasoning payload rejection", {
+          model: params.modelName,
+          from: getReasoningSelectionKey(execution.context.reasoning),
+          to: nextKey,
+          error: message,
+        });
+        attemptedSelections.add(nextKey);
+        execution.context.reasoning = recovered;
+        retries += 1;
       }
-      const recovered = (
-        params.getRecoverySelection || getReasoningRecoverySelection
-      )({
-        currentReasoning: reasoningSelection,
-        modelName: params.modelName,
-      });
-      if (recovered === null) {
-        throw err;
-      }
-      const nextKey = getReasoningSelectionKey(recovered);
-      if (attemptedSelections.has(nextKey)) {
-        throw err;
-      }
-      appLogger.debug("LLM: Retrying after reasoning payload rejection", {
-        model: params.modelName,
-        from: getReasoningSelectionKey(reasoningSelection),
-        to: nextKey,
-        error: message,
-      });
-      attemptedSelections.add(nextKey);
-      reasoningSelection = recovered;
-      retries += 1;
     }
-  }
 
-  throw (lastError as Error) || new Error("Request failed after retries");
+    throw (lastError as Error) || new Error("Request failed after retries");
+  });
 }
 
 function extractResponsesOutputText(data: {
@@ -4296,9 +4658,18 @@ async function callNativeProtocol(params: {
  * Call LLM API (non-streaming)
  */
 export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
+  const route = resolveChatRouteCapabilities(params);
+  if (route.paperRegistry || route.directWebPdf) {
+    return callLLMStream(params, () => {});
+  }
   const requestScope = params.requestScope ?? createProviderRequestScope();
   params = { ...params, requestScope };
+  throwIfAborted(params.signal);
   await preflightRequestModelCapabilities(params);
+  throwIfAborted(params.signal);
+  if (getApiConfig(params).authMode === "codex_auth") {
+    return callLLMStream(params, () => undefined, undefined, undefined);
+  }
   const prepared = prepareChatRequest(params);
   const {
     apiBase,
@@ -4309,9 +4680,6 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     inputCap,
     providerProtocol,
   } = prepared;
-  if (authMode === "codex_auth") {
-    assertCodexDirectModelAvailable(model);
-  }
   const outputPolicy = resolveAndLogOutputPolicy({
     setting: params.outputTokenLimit,
     model,
@@ -4349,14 +4717,18 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     });
   }
   assertCodexAppServerUsesNativeRuntime(authMode);
-  if (authMode === "codex_auth") {
-    return callLLMStream(params, () => undefined, undefined, undefined);
-  }
   const auth = await resolveRequestAuthState({
     authMode,
     apiKey,
     signal: params.signal,
   });
+  const codexCatalog =
+    auth.mode === "codex_auth"
+      ? captureCodexDirectRequestCatalog(
+          auth.codex ? { ...auth.codex, token: auth.token } : undefined,
+        )
+      : undefined;
+  codexCatalog?.assertModelAvailable(model);
   if (inputCap.capped) {
     appLogger.debug("LLM: Applied model-aware input cap", {
       model,
@@ -4370,17 +4742,16 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
   const useResponses =
     providerProtocol === "responses_api" ||
     providerProtocol === "codex_responses";
-  // Only upload files via /v1/files for providers that actually host that endpoint.
-  // Third-party relays using responses_api get inline base64 instead (via buildResponsesInput).
-  const canUploadFiles = useResponses && providerSupportsFileUploads(apiBase);
-  const responseFileIds = canUploadFiles
-    ? await uploadFilesForResponses({
-        apiBase,
-        apiKey: auth.token,
-        attachments: params.attachments,
-        signal: params.signal,
-      })
-    : [];
+  const { responseFileIds, responseFilePartsByMessage, allowAutomaticRetry } =
+    await prepareResponsesAttachments({
+      ...params,
+      apiBase,
+      apiKey: auth.token,
+      authMode,
+      model,
+      providerProtocol,
+      messages,
+    });
   const effectiveTemperature = normalizeTemperature(params.temperature);
   const outputReserveTokens = resolveOutputReserve(
     params.outputTokenLimit,
@@ -4406,10 +4777,12 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     authMode,
   });
   const buildPayload = createChatPayloadBuilder({
+    codexCatalog,
     model,
     messages,
     useResponses,
     responseFileIds,
+    responseFilePartsByMessage,
     authMode,
     apiBase,
     providerProtocol,
@@ -4427,6 +4800,7 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     scope: requestScope,
     auth,
     headers: requestHeaders,
+    allowAutomaticRetry,
     modelName: model,
     initialReasoning: params.reasoning,
     buildPayload,
@@ -4452,16 +4826,221 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
 /**
  * Call LLM API with streaming response
  */
+async function callCprDirectWebStream(
+  params: ChatParams,
+  onDelta: (delta: string) => void,
+  onReasoning?: (event: ReasoningEvent) => void,
+  onUsage?: (usage: UsageStats) => void,
+): Promise<ModelTurnOutcome> {
+  if (!params.apiBase || !params.apiKey) {
+    throw new Error("请配置 CPR API 地址和密钥。");
+  }
+  const requestScope = params.requestScope ?? createProviderRequestScope();
+  const prepared = await prepareCprDirectWebRequest({
+    model: params.model || "",
+    apiBase: params.apiBase,
+    reasoning: params.reasoning,
+    profileOverride: params.profileOverride,
+    prompt: params.prompt,
+    refs: [...(params.cprPaperContexts || [])],
+    images: params.images || (params.image ? [params.image] : undefined),
+    requestScope,
+    signal: params.signal,
+    readBytes: readLocalFileBytes,
+  });
+  if (prepared.uncertain.length) {
+    const warning = prepared.uncertain
+      .map((entry) => `${CPR_DIRECT_WEB_UNCERTAIN_MESSAGE} (${entry.filename})`)
+      .join("\n");
+    const lastMessage =
+      prepared.payload.input[prepared.payload.input.length - 1];
+    const lastText = lastMessage?.content.find(
+      (part) => part.type === "input_text",
+    );
+    if (lastText?.type === "input_text") {
+      lastText.text = `${warning}\n\n${lastText.text}`;
+    }
+  }
+  let response: Response;
+  try {
+    const fetchFn = getFetch();
+    const endpoint = resolveEndpoint(params.apiBase, "/v1/responses");
+    const body = JSON.stringify(prepared.payload);
+    params.signal?.throwIfAborted();
+    prepared.markDispatched();
+    response = await sendProviderRequest({
+      url: endpoint,
+      scope: requestScope,
+      fetchFn,
+      init: {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${params.apiKey}`,
+        },
+        body,
+        signal: params.signal,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(
+        `CPR ChatGPT Web HTTP ${response.status}: ${(await response.text()).slice(0, 600)}`,
+      );
+    }
+    if (!response.body)
+      throw new Error("CPR ChatGPT Web 未返回事件流；未自动重发。");
+    const outcome = await parseResponsesStream(
+      response.body,
+      onDelta,
+      onReasoning,
+      onUsage,
+      {
+        requireCompleted: true,
+        collectRichWidgets: true,
+      },
+    );
+    if (outcome.completion.status === "complete") {
+      prepared.accept();
+    } else {
+      prepared.markUncertain();
+    }
+    return outcome;
+  } catch (error) {
+    prepared.releaseUnsent();
+    prepared.markUncertain();
+    throw error;
+  }
+}
+
 export async function callLLMStream(
   params: ChatParams,
   onDelta: (delta: string) => void,
   onReasoning?: (event: ReasoningEvent) => void,
   onUsage?: (usage: UsageStats) => void,
 ): Promise<ModelTurnOutcome> {
+  const routeCapabilities = resolveChatRouteCapabilities(params);
+  if (routeCapabilities.paperRegistry) {
+    if (params.inputMode === "text_only") {
+      throw new Error(
+        "当前论文会话需要 PDF 输入；仅文本设置下不会读取或上传 PDF。请切换模型或允许 PDF 输入。",
+      );
+    }
+    if (!params.apiBase || !params.apiKey)
+      throw new Error("请配置 CPR API 地址和密钥。");
+    if (!params.cprPaperSessionId?.trim()) {
+      throw new Error(
+        "论文请求缺少会话身份；请重新打开会话后发送，没有登记或上传 PDF。",
+      );
+    }
+    const paperRequest = await prepareCprPaperRequest({
+      itemId: params.cprPaperItemId,
+      apiBase: params.apiBase,
+      apiKey: params.apiKey,
+      paperSessionId: params.cprPaperSessionId,
+      model: params.model,
+      reasoning: params.reasoning,
+      profileOverride: params.profileOverride,
+      fetchFn: getFetch(),
+      signal: params.signal,
+      prompt: params.prompt,
+      images: params.images || (params.image ? [params.image] : undefined),
+      readBytes: readLocalFileBytes,
+    });
+    const encodedRequest = encodeCprPapersRequestBody(paperRequest.payload);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+    };
+    if (encodedRequest.contentEncoding === "gzip") {
+      headers["Content-Encoding"] = "gzip";
+    }
+    params.signal?.throwIfAborted();
+    const response = await sendProviderRequest({
+      url: resolveEndpoint(params.apiBase, "/v1/responses"),
+      scope: params.requestScope ?? { operationId: params.cprPaperSessionId },
+      fetchFn: getFetch(),
+      init: {
+        method: "POST",
+        headers,
+        body: encodedRequest.body,
+        signal: params.signal,
+      },
+    });
+    if (!response.ok) {
+      const failure = describeCprPapersHttpFailure({
+        status: response.status,
+        bodyText: await response.text(),
+        cfRay: response.headers.get("cf-ray"),
+        requestId: response.headers.get("x-request-id"),
+        wireBytes: encodedRequest.wireBytes,
+        contentEncoding: encodedRequest.contentEncoding,
+      });
+      appLogger.warn("CPR papers request failed", {
+        status: failure.status,
+        wireBytes: failure.wireBytes,
+        encoding: failure.contentEncoding,
+        cfRay: failure.cfRay || "",
+        requestId: failure.requestId || "",
+        model: params.model || "",
+        message: failure.responseMessage || "",
+      });
+      throw new Error(failure.error);
+    }
+    if (!response.body) {
+      throw new Error(
+        `CPR papers 未返回事件流（HTTP ${response.status}；wire=${encodedRequest.wireBytes} bytes；encoding=${encodedRequest.contentEncoding}）；未自动重发。`,
+      );
+    }
+    const outcome = await parseResponsesStream(
+      response.body,
+      onDelta,
+      onReasoning,
+      onUsage,
+      { requireCompleted: true, collectRichWidgets: true },
+    );
+    if (outcome.completion.status === "complete") paperRequest.accept();
+    return outcome;
+  }
+  if (routeCapabilities.directWebPdf) {
+    return callCprDirectWebStream(params, onDelta, onReasoning, onUsage);
+  }
   const requestScope = params.requestScope ?? createProviderRequestScope();
   params = { ...params, requestScope };
+  throwIfAborted(params.signal);
   await preflightRequestModelCapabilities(params);
-  const prepared = prepareChatRequest(params);
+  throwIfAborted(params.signal);
+  const requestConfig = getApiConfig(params);
+  const isCodexDirect = requestConfig.authMode === "codex_auth";
+  if (isCodexDirect) {
+    params = {
+      ...params,
+      apiBase: requestConfig.apiBase,
+      apiKey: requestConfig.apiKey,
+      authMode: requestConfig.authMode,
+      model: requestConfig.model,
+      providerProtocol: requestConfig.providerProtocol,
+    };
+  }
+  const directAuth = isCodexDirect
+    ? await resolveRequestAuthState({
+        authMode: requestConfig.authMode,
+        apiKey: requestConfig.apiKey,
+        signal: params.signal,
+      })
+    : undefined;
+  throwIfAborted(params.signal);
+  const codexCatalog = directAuth
+    ? captureCodexDirectRequestCatalog(
+        directAuth.codex
+          ? { ...directAuth.codex, token: directAuth.token }
+          : undefined,
+      )
+    : undefined;
+  codexCatalog?.assertModelAvailable(requestConfig.model);
+  const prepared = prepareChatRequest(
+    params,
+    codexCatalog?.getModelLimits(requestConfig.model),
+  );
   const {
     apiBase,
     apiKey,
@@ -4471,9 +5050,6 @@ export async function callLLMStream(
     inputCap,
     providerProtocol,
   } = prepared;
-  if (authMode === "codex_auth") {
-    assertCodexDirectModelAvailable(model);
-  }
   const outputPolicy = resolveAndLogOutputPolicy({
     setting: params.outputTokenLimit,
     model,
@@ -4514,11 +5090,13 @@ export async function callLLMStream(
     });
   }
   assertCodexAppServerUsesNativeRuntime(authMode);
-  const auth = await resolveRequestAuthState({
-    authMode,
-    apiKey,
-    signal: params.signal,
-  });
+  const auth =
+    directAuth ??
+    (await resolveRequestAuthState({
+      authMode,
+      apiKey,
+      signal: params.signal,
+    }));
   if (inputCap.capped) {
     appLogger.debug("LLM: Applied model-aware input cap", {
       model,
@@ -4541,17 +5119,16 @@ export async function callLLMStream(
   const useResponses =
     providerProtocol === "responses_api" ||
     providerProtocol === "codex_responses";
-  // Only upload files via /v1/files for providers that actually host that endpoint.
-  // Third-party relays using responses_api get inline base64 instead (via buildResponsesInput).
-  const canUploadFiles = useResponses && providerSupportsFileUploads(apiBase);
-  const responseFileIds = canUploadFiles
-    ? await uploadFilesForResponses({
-        apiBase,
-        apiKey: auth.token,
-        attachments: params.attachments,
-        signal: params.signal,
-      })
-    : [];
+  const { responseFileIds, responseFilePartsByMessage, allowAutomaticRetry } =
+    await prepareResponsesAttachments({
+      ...params,
+      apiBase,
+      apiKey: auth.token,
+      authMode,
+      model,
+      providerProtocol,
+      messages,
+    });
   const effectiveTemperature = normalizeTemperature(params.temperature);
   const outputReserveTokens = resolveOutputReserve(
     params.outputTokenLimit,
@@ -4577,10 +5154,12 @@ export async function callLLMStream(
     authMode,
   });
   const buildPayload = createChatPayloadBuilder({
+    codexCatalog,
     model,
     messages,
     useResponses,
     responseFileIds,
+    responseFilePartsByMessage,
     authMode,
     apiBase,
     providerProtocol,
@@ -4597,11 +5176,28 @@ export async function callLLMStream(
     scope: requestScope,
     auth,
     ...(authMode === "codex_auth" ? {} : { headers: requestHeaders }),
+    allowAutomaticRetry,
     modelName: model,
     initialReasoning: params.reasoning,
     buildPayload,
     signal: params.signal,
   });
+
+  if (authMode === "codex_auth") {
+    const execution = new RequestExecution(undefined, params.signal);
+    return execution.run(async () => {
+      if (!res.body) {
+        const data = (await execution.wait(() => res.json())) as Parameters<
+          typeof extractResponsesOutcome
+        >[0];
+        return extractResponsesOutcome(data);
+      }
+      return parseResponsesStream(res.body, onDelta, onReasoning, onUsage, {
+        signal: params.signal,
+        stopAtTerminal: true,
+      });
+    });
+  }
 
   // Fallback to non-streaming if body is not available
   if (!res.body) {
@@ -4833,19 +5429,52 @@ export async function parseStreamResponse(
         const data = trimmed.slice(5).trim();
         if (!data || data === "[DONE]") continue;
 
-        try {
-          const parsed = JSON.parse(data) as {
-            choices?: Array<StreamChoice & { finish_reason?: string | null }>;
-            usage?: {
-              prompt_tokens?: number;
-              completion_tokens?: number;
-              total_tokens?: number;
-              prompt_tokens_details?: { cached_tokens?: number };
-              prompt_cache_hit_tokens?: number;
-              prompt_cache_miss_tokens?: number;
-              cached_tokens?: number;
-            };
+        let parsed: {
+          error?: { message?: unknown; code?: unknown; type?: unknown };
+          choices?: Array<StreamChoice & { finish_reason?: string | null }>;
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+            prompt_tokens_details?: { cached_tokens?: number };
+            prompt_cache_hit_tokens?: number;
+            prompt_cache_miss_tokens?: number;
+            cached_tokens?: number;
           };
+        };
+        try {
+          parsed = JSON.parse(data);
+        } catch (err) {
+          appLogger.warn("LLM stream parse error:", err);
+          continue;
+        }
+        // A valid SSE error is a failed turn, even after answer deltas.
+        // Include metadata in the message because the UI renders Error.message.
+        if (parsed?.error && typeof parsed.error === "object") {
+          const message =
+            typeof parsed.error.message === "string" &&
+            parsed.error.message.trim()
+              ? parsed.error.message
+              : "Chat Completions stream failed.";
+          const code =
+            typeof parsed.error.code === "string" ||
+            typeof parsed.error.code === "number"
+              ? parsed.error.code
+              : undefined;
+          const type =
+            typeof parsed.error.type === "string"
+              ? parsed.error.type
+              : undefined;
+          throw Object.assign(
+            new Error(
+              `Chat Completions stream error: ${message}${
+                code !== undefined ? `; code=${code}` : ""
+              }${type !== undefined ? `; type=${type}` : ""}`,
+            ),
+            { code, type },
+          );
+        }
+        try {
           if (parsed.usage && onUsage) {
             const totalTokens =
               parsed.usage.total_tokens ??
@@ -4921,228 +5550,277 @@ export async function parseStreamResponse(
 
 export async function parseResponsesStream(
   body: ReadableStream<Uint8Array>,
-  onDelta: (delta: string) => void,
-  onReasoning?: (event: ReasoningEvent) => void,
-  onUsage?: (usage: UsageStats) => void,
+  onDelta: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
+  onUsage?: (usage: UsageStats) => void | Promise<void>,
+  options: {
+    requireCompleted?: boolean;
+    collectRichWidgets?: boolean;
+    stopAtTerminal?: boolean;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<ModelTurnOutcome> {
-  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let fullText = "";
-  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
-  const thoughtState: ThoughtTagState = {
-    inThought: false,
-    buffer: "",
-    sawAnswerText: false,
-  };
-  let sawAnswerDelta = false;
-  let sawAnswerFinal = false;
-  let sawSummaryDelta = false;
-  let sawDetailsDelta = false;
-  let sawSummaryFinal = false;
-  let sawDetailsFinal = false;
-  let responseId: string | undefined;
+  const execution = new RequestExecution(undefined, options.signal);
+  return execution.run(async () => {
+    const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let fullText = "";
+    let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+    const thoughtState: ThoughtTagState = {
+      inThought: false,
+      buffer: "",
+      sawAnswerText: false,
+    };
+    let sawAnswerDelta = false;
+    let sawAnswerFinal = false;
+    let sawSummaryDelta = false;
+    let sawDetailsDelta = false;
+    let sawSummaryFinal = false;
+    let sawDetailsFinal = false;
+    let responseId: string | undefined;
+    let sawCompleted = false;
+    let sawTerminal = false;
+    let streamFailure: Error | undefined;
+    let tailCallbackFailed = false;
+    let tailCallbackError: unknown;
+    const richWidgets: CprChartWidget[] = [];
+    const receiveRichWidgets = (value: unknown): void => {
+      if (!options.collectRichWidgets) return;
+      for (const candidate of Array.isArray(value) ? value : [value]) {
+        if (richWidgets.length >= 4) break;
+        const widget = parseCprChartWidget(candidate);
+        if (
+          widget &&
+          !richWidgets.some((existing) => existing.id === widget.id)
+        ) {
+          richWidgets.push(widget);
+        }
+      }
+    };
 
-  const normalizeReasoningText = (value: unknown): string => {
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      return value
-        .map((entry) => {
-          if (typeof entry === "string") return entry;
-          if (entry && typeof entry === "object") {
-            const row = entry as { text?: unknown; summary?: unknown };
-            return (
-              normalizeStreamText(row.text) || normalizeStreamText(row.summary)
-            );
-          }
+    const normalizeReasoningText = (value: unknown): string => {
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => {
+            if (typeof entry === "string") return entry;
+            if (entry && typeof entry === "object") {
+              const row = entry as { text?: unknown; summary?: unknown };
+              return (
+                normalizeStreamText(row.text) ||
+                normalizeStreamText(row.summary)
+              );
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (value && typeof value === "object") {
+        const row = value as { text?: unknown; summary?: unknown };
+        return (
+          normalizeStreamText(row.text) || normalizeStreamText(row.summary)
+        );
+      }
+      return "";
+    };
+
+    const extractSummary = (value: unknown): string => {
+      if (!value) return "";
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => {
+            if (typeof entry === "string") return entry;
+            if (entry && typeof entry === "object") {
+              const row = entry as { text?: unknown; summary?: unknown };
+              return (
+                normalizeStreamText(row.text) ||
+                normalizeStreamText(row.summary)
+              );
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (value && typeof value === "object") {
+        const row = value as { text?: unknown; summary?: unknown };
+        return (
+          normalizeStreamText(row.text) || normalizeStreamText(row.summary)
+        );
+      }
+      return "";
+    };
+
+    const emitReasoning = async (event: ReasoningEvent) => {
+      if (!onReasoning) return;
+      const summary =
+        typeof event.summary === "string" && event.summary.length > 0
+          ? event.summary
+          : undefined;
+      const details =
+        typeof event.details === "string" && event.details.length > 0
+          ? event.details
+          : undefined;
+      if (!summary && !details) return;
+      await execution.wait(() => onReasoning({ summary, details }));
+    };
+
+    const emitAnswer = async (
+      value: unknown,
+      mode: "delta" | "final",
+    ): Promise<void> => {
+      const text = normalizeStreamText(value);
+      if (!text) return;
+      if (mode === "delta" && sawAnswerFinal) return;
+      if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
+
+      const { answer, thought } = splitThoughtTaggedText(text, thoughtState);
+      if (thought && onReasoning) {
+        await execution.wait(() => onReasoning({ details: thought }));
+      }
+      if (!answer) return;
+
+      if (mode === "delta") {
+        sawAnswerDelta = true;
+      } else {
+        sawAnswerFinal = true;
+      }
+      fullText += answer;
+      await execution.wait(() => onDelta(answer));
+    };
+
+    const extractOutputTextFromContent = (value: unknown): string => {
+      if (!value) return "";
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => extractOutputTextFromContent(entry))
+          .filter(Boolean)
+          .join("");
+      }
+      if (value && typeof value === "object") {
+        const row = value as {
+          type?: unknown;
+          text?: unknown;
+          delta?: unknown;
+          content?: unknown;
+        };
+        const typeValue =
+          typeof row.type === "string" ? row.type.toLowerCase() : "";
+        if (typeValue === "reasoning" || typeValue === "reasoning_summary") {
           return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-    if (value && typeof value === "object") {
-      const row = value as { text?: unknown; summary?: unknown };
-      return normalizeStreamText(row.text) || normalizeStreamText(row.summary);
-    }
-    return "";
-  };
+        }
+        if (
+          typeValue === "output_text" ||
+          typeValue === "text" ||
+          typeValue === "message" ||
+          typeValue === ""
+        ) {
+          return (
+            normalizeStreamText(row.text) ||
+            normalizeStreamText(row.delta) ||
+            extractOutputTextFromContent(row.content)
+          );
+        }
+      }
+      return "";
+    };
 
-  const extractSummary = (value: unknown): string => {
-    if (!value) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      return value
-        .map((entry) => {
-          if (typeof entry === "string") return entry;
-          if (entry && typeof entry === "object") {
-            const row = entry as { text?: unknown; summary?: unknown };
-            return (
-              normalizeStreamText(row.text) || normalizeStreamText(row.summary)
-            );
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-    if (value && typeof value === "object") {
-      const row = value as { text?: unknown; summary?: unknown };
-      return normalizeStreamText(row.text) || normalizeStreamText(row.summary);
-    }
-    return "";
-  };
-
-  const emitReasoning = (event: ReasoningEvent) => {
-    if (!onReasoning) return;
-    const summary =
-      typeof event.summary === "string" && event.summary.length > 0
-        ? event.summary
-        : undefined;
-    const details =
-      typeof event.details === "string" && event.details.length > 0
-        ? event.details
-        : undefined;
-    if (!summary && !details) return;
-    onReasoning({ summary, details });
-  };
-
-  const emitAnswer = (value: unknown, mode: "delta" | "final"): void => {
-    const text = normalizeStreamText(value);
-    if (!text) return;
-    if (mode === "delta" && sawAnswerFinal) return;
-    if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
-
-    const { answer, thought } = splitThoughtTaggedText(text, thoughtState);
-    if (thought && onReasoning) {
-      onReasoning({ details: thought });
-    }
-    if (!answer) return;
-
-    if (mode === "delta") {
-      sawAnswerDelta = true;
-    } else {
-      sawAnswerFinal = true;
-    }
-    fullText += answer;
-    onDelta(answer);
-  };
-
-  const extractOutputTextFromContent = (value: unknown): string => {
-    if (!value) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      return value
-        .map((entry) => extractOutputTextFromContent(entry))
-        .filter(Boolean)
-        .join("");
-    }
-    if (value && typeof value === "object") {
+    const extractOutputTextFromOutputItem = (value: unknown): string => {
+      if (!value || typeof value !== "object") return "";
       const row = value as {
         type?: unknown;
         text?: unknown;
-        delta?: unknown;
         content?: unknown;
       };
       const typeValue =
         typeof row.type === "string" ? row.type.toLowerCase() : "";
-      if (typeValue === "reasoning" || typeValue === "reasoning_summary") {
+      if (
+        typeValue &&
+        typeValue !== "message" &&
+        typeValue !== "output_text" &&
+        typeValue !== "text"
+      ) {
         return "";
       }
-      if (
-        typeValue === "output_text" ||
-        typeValue === "text" ||
-        typeValue === "message" ||
-        typeValue === ""
-      ) {
-        return (
-          normalizeStreamText(row.text) ||
-          normalizeStreamText(row.delta) ||
-          extractOutputTextFromContent(row.content)
-        );
+      return (
+        extractOutputTextFromContent(row.content) ||
+        normalizeStreamText(row.text)
+      );
+    };
+
+    const extractOutputTextFromOutputs = (outputs: unknown): string => {
+      if (!Array.isArray(outputs)) return "";
+      return outputs
+        .map((entry) => extractOutputTextFromOutputItem(entry))
+        .filter(Boolean)
+        .join("");
+    };
+
+    const emitReasoningFromOutputItem = async (
+      value: unknown,
+    ): Promise<void> => {
+      if (!value || typeof value !== "object") return;
+      const row = value as {
+        type?: unknown;
+        summary?: unknown;
+        content?: unknown;
+        text?: unknown;
+        reasoning?: unknown;
+      };
+      const typeValue =
+        typeof row.type === "string" ? row.type.toLowerCase() : "";
+      if (typeValue !== "reasoning") return;
+      if (!sawSummaryDelta && !sawSummaryFinal) {
+        await emitReasoning({ summary: extractSummary(row.summary) });
       }
-    }
-    return "";
-  };
-
-  const extractOutputTextFromOutputItem = (value: unknown): string => {
-    if (!value || typeof value !== "object") return "";
-    const row = value as {
-      type?: unknown;
-      text?: unknown;
-      content?: unknown;
+      if (!sawDetailsDelta && !sawDetailsFinal) {
+        await emitReasoning({
+          details:
+            normalizeReasoningText(row.content) ||
+            normalizeReasoningText(row.reasoning) ||
+            normalizeReasoningText(row.text),
+        });
+      }
     };
-    const typeValue =
-      typeof row.type === "string" ? row.type.toLowerCase() : "";
-    if (
-      typeValue &&
-      typeValue !== "message" &&
-      typeValue !== "output_text" &&
-      typeValue !== "text"
-    ) {
-      return "";
-    }
-    return (
-      extractOutputTextFromContent(row.content) || normalizeStreamText(row.text)
-    );
-  };
 
-  const extractOutputTextFromOutputs = (outputs: unknown): string => {
-    if (!Array.isArray(outputs)) return "";
-    return outputs
-      .map((entry) => extractOutputTextFromOutputItem(entry))
-      .filter(Boolean)
-      .join("");
-  };
+    try {
+      readStream: while (true) {
+        const { value, done } = await execution.wait(() => reader.read());
 
-  const emitReasoningFromOutputItem = (value: unknown): void => {
-    if (!value || typeof value !== "object") return;
-    const row = value as {
-      type?: unknown;
-      summary?: unknown;
-      content?: unknown;
-      text?: unknown;
-      reasoning?: unknown;
-    };
-    const typeValue =
-      typeof row.type === "string" ? row.type.toLowerCase() : "";
-    if (typeValue !== "reasoning") return;
-    if (!sawSummaryDelta && !sawSummaryFinal) {
-      emitReasoning({ summary: extractSummary(row.summary) });
-    }
-    if (!sawDetailsDelta && !sawDetailsFinal) {
-      emitReasoning({
-        details:
-          normalizeReasoningText(row.content) ||
-          normalizeReasoningText(row.reasoning) ||
-          normalizeReasoningText(row.text),
-      });
-    }
-  };
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        if (done && buffer) {
+          lines.push(buffer);
+          buffer = "";
+        }
 
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
+        for (const line of lines) {
+          execution.assertActive();
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+          const data = trimmed.slice(5).trim();
+          if (!data) continue;
+          if (data === "[DONE]") {
+            if (options.requireCompleted) break readStream;
+            continue;
+          }
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-
-        const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-
-        try {
-          const parsed = JSON.parse(data) as {
+          let parsed: {
             type?: string;
+            widget?: unknown;
+            code?: unknown;
+            error?: { message?: unknown; code?: unknown; type?: unknown };
             delta?: unknown;
             text?: unknown;
             summary?: unknown;
             reasoning?: unknown;
-            message?: { content?: unknown };
+            message?: string | { content?: unknown };
             item?: {
               type?: string;
               summary?: unknown;
@@ -5157,6 +5835,8 @@ export async function parseResponsesStream(
             };
             response?: {
               id?: string;
+              error?: { message?: unknown; code?: unknown; type?: unknown };
+              rich_widgets?: unknown;
               status?: string;
               incomplete_details?: { reason?: string } | null;
               output_text?: unknown;
@@ -5170,14 +5850,82 @@ export async function parseResponsesStream(
               };
             };
           };
+          try {
+            parsed = JSON.parse(data);
+          } catch (error) {
+            if (options.requireCompleted) throw error;
+            if (!done)
+              appLogger.warn("LLM responses stream parse error:", error);
+            continue;
+          }
 
           const eventType =
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
+          // Explicit provider failure is never a successful empty turn,
+          // regardless of whether this caller requires response.completed.
+          if (
+            eventType === "response.failed" ||
+            eventType === "error" ||
+            (parsed.error && typeof parsed.error === "object")
+          ) {
+            const error = parsed.response?.error || parsed.error || parsed;
+            const message =
+              typeof error.message === "string" && error.message.trim()
+                ? error.message
+                : "CPR Responses request failed; no automatic retry was attempted.";
+            const code =
+              typeof error.code === "string" || typeof error.code === "number"
+                ? error.code
+                : undefined;
+            const type =
+              error !== parsed && typeof error.type === "string"
+                ? error.type
+                : undefined;
+            // Reuse the Chat SSE error contract: the UI persists message,
+            // while callers can also inspect the allowlisted code/type.
+            streamFailure = Object.assign(
+              new Error(
+                `Responses stream error: ${message}${
+                  code !== undefined ? `; code=${code}` : ""
+                }${type !== undefined ? `; type=${type}` : ""}`,
+              ),
+              { code, type },
+            );
+            throw streamFailure;
+          }
+          // Check an unterminated EOF frame for failure above, but preserve
+          // legacy handling of successful EOF tails for non-strict callers.
+          if (done && !options.requireCompleted && !options.stopAtTerminal)
+            continue;
+          const messageContent =
+            typeof parsed.message === "object"
+              ? parsed.message?.content
+              : undefined;
           if (typeof parsed.response?.id === "string") {
             responseId = parsed.response.id;
           }
 
+          if (eventType === "response.rich_widget.done") {
+            receiveRichWidgets(parsed.widget);
+            continue;
+          }
+          if (
+            options.stopAtTerminal &&
+            (eventType === "response.completed" ||
+              eventType === "response.incomplete") &&
+            (!parsed.response ||
+              (parsed.response.status &&
+                parsed.response.status !==
+                  (eventType === "response.completed"
+                    ? "completed"
+                    : "incomplete")))
+          ) {
+            throw new Error(
+              "Responses terminal event has an invalid response status.",
+            );
+          }
           if (eventType === "response.incomplete") {
+            sawTerminal = true;
             completion = normalizeProviderCompletion(
               parsed.response?.incomplete_details?.reason,
               { responseStatus: parsed.response?.status || "incomplete" },
@@ -5192,7 +5940,7 @@ export async function parseResponsesStream(
           }
 
           if (eventType === "response.output_text.delta" && parsed.delta) {
-            emitAnswer(parsed.delta, "delta");
+            await emitAnswer(parsed.delta, "delta");
             continue;
           }
 
@@ -5209,7 +5957,7 @@ export async function parseResponsesStream(
               partType === "output_text" ||
               partType === "text"
             ) {
-              emitAnswer(
+              await emitAnswer(
                 parsed.delta ??
                   parsed.text ??
                   parsed.part?.text ??
@@ -5222,7 +5970,7 @@ export async function parseResponsesStream(
 
           if (eventType === "response.output_text.done") {
             // Some providers emit full text in `done` after streaming deltas.
-            emitAnswer(parsed.text ?? parsed.delta, "final");
+            await emitAnswer(parsed.text ?? parsed.delta, "final");
             continue;
           }
 
@@ -5236,7 +5984,7 @@ export async function parseResponsesStream(
               partType === "output_text" ||
               partType === "text"
             ) {
-              emitAnswer(
+              await emitAnswer(
                 parsed.text ??
                   parsed.delta ??
                   parsed.part?.text ??
@@ -5251,12 +5999,12 @@ export async function parseResponsesStream(
             eventType === "response.message.delta" ||
             eventType === "response.message.added"
           ) {
-            emitAnswer(parsed.message?.content, "delta");
+            await emitAnswer(messageContent, "delta");
             continue;
           }
 
           if (eventType === "response.message.done") {
-            emitAnswer(parsed.message?.content, "final");
+            await emitAnswer(messageContent, "final");
             continue;
           }
 
@@ -5266,7 +6014,7 @@ export async function parseResponsesStream(
             parsed.delta
           ) {
             sawSummaryDelta = true;
-            emitReasoning({ summary: normalizeStreamText(parsed.delta) });
+            await emitReasoning({ summary: normalizeStreamText(parsed.delta) });
             continue;
           }
 
@@ -5277,7 +6025,7 @@ export async function parseResponsesStream(
           ) {
             sawSummaryFinal = true;
             if (!sawSummaryDelta) {
-              emitReasoning({
+              await emitReasoning({
                 summary: normalizeStreamText(parsed.text ?? parsed.delta),
               });
             }
@@ -5303,7 +6051,7 @@ export async function parseResponsesStream(
               );
               if (partSummary) {
                 sawSummaryFinal = true;
-                emitReasoning({ summary: partSummary });
+                await emitReasoning({ summary: partSummary });
               }
             }
             continue;
@@ -5315,7 +6063,7 @@ export async function parseResponsesStream(
             parsed.delta
           ) {
             sawDetailsDelta = true;
-            emitReasoning({ details: normalizeStreamText(parsed.delta) });
+            await emitReasoning({ details: normalizeStreamText(parsed.delta) });
             continue;
           }
 
@@ -5326,7 +6074,7 @@ export async function parseResponsesStream(
           ) {
             sawDetailsFinal = true;
             if (!sawDetailsDelta) {
-              emitReasoning({
+              await emitReasoning({
                 details: normalizeStreamText(parsed.text ?? parsed.delta),
               });
             }
@@ -5336,7 +6084,7 @@ export async function parseResponsesStream(
           if (eventType === "response.reasoning" && parsed.reasoning) {
             sawDetailsFinal = true;
             if (!sawDetailsDelta) {
-              emitReasoning({
+              await emitReasoning({
                 details: normalizeReasoningText(parsed.reasoning),
               });
             }
@@ -5347,15 +6095,21 @@ export async function parseResponsesStream(
             eventType === "response.output_item.added" ||
             eventType === "response.output_item.delta"
           ) {
-            emitReasoningFromOutputItem(parsed.item);
-            emitAnswer(extractOutputTextFromOutputItem(parsed.item), "delta");
+            await emitReasoningFromOutputItem(parsed.item);
+            await emitAnswer(
+              extractOutputTextFromOutputItem(parsed.item),
+              "delta",
+            );
             continue;
           }
 
           if (eventType === "response.output_item.done") {
-            emitReasoningFromOutputItem(parsed.item);
-            emitAnswer(extractOutputTextFromOutputItem(parsed.item), "final");
-            emitAnswer(
+            await emitReasoningFromOutputItem(parsed.item);
+            await emitAnswer(
+              extractOutputTextFromOutputItem(parsed.item),
+              "final",
+            );
+            await emitAnswer(
               extractOutputTextFromOutputs(parsed.response?.output),
               "final",
             );
@@ -5363,14 +6117,30 @@ export async function parseResponsesStream(
               ? parsed.response.output
               : [];
             for (const out of outputs) {
-              emitReasoningFromOutputItem(out);
+              await emitReasoningFromOutputItem(out);
             }
             continue;
           }
 
-          if (eventType === "response.completed") {
-            completion = COMPLETE_MODEL_TURN;
-            emitAnswer(
+          if (
+            eventType === "response.completed" ||
+            (options.stopAtTerminal && eventType === "response.incomplete")
+          ) {
+            if (
+              options.requireCompleted &&
+              (!parsed.response ||
+                (parsed.response.status &&
+                  parsed.response.status !== "completed"))
+            ) {
+              throw new Error(
+                "Responses terminal event has an invalid response status.",
+              );
+            }
+            sawTerminal = true;
+            sawCompleted = eventType === "response.completed";
+            receiveRichWidgets(parsed.response?.rich_widgets);
+            if (sawCompleted) completion = COMPLETE_MODEL_TURN;
+            await emitAnswer(
               parsed.response?.output_text ??
                 extractOutputTextFromOutputs(parsed.response?.output),
               "final",
@@ -5382,14 +6152,16 @@ export async function parseResponsesStream(
                 (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
               if (total > 0) {
                 const cacheUsage = extractContextCacheUsage(u);
-                onUsage({
-                  promptTokens: u.input_tokens ?? 0,
-                  completionTokens: u.output_tokens ?? 0,
-                  totalTokens: total,
-                  ...cacheUsage,
-                  contextTokens: u.input_tokens ?? 0,
-                  contextWindowIsAuthoritative: (u.input_tokens ?? 0) > 0,
-                });
+                await execution.wait(() =>
+                  onUsage({
+                    promptTokens: u.input_tokens ?? 0,
+                    completionTokens: u.output_tokens ?? 0,
+                    totalTokens: total,
+                    ...cacheUsage,
+                    contextTokens: u.input_tokens ?? 0,
+                    contextWindowIsAuthoritative: (u.input_tokens ?? 0) > 0,
+                  }),
+                );
               }
             }
           }
@@ -5403,32 +6175,65 @@ export async function parseResponsesStream(
               ? parsed.response.output
               : [];
             for (const out of outputs) {
-              emitReasoningFromOutputItem(out);
+              await emitReasoningFromOutputItem(out);
             }
           }
-        } catch (err) {
-          appLogger.warn("LLM responses stream parse error:", err);
+          if (
+            (options.requireCompleted || options.stopAtTerminal) &&
+            sawTerminal
+          )
+            break readStream;
+        }
+        if (done) break;
+      }
+      if (options.requireCompleted && !sawCompleted) {
+        throw new Error(
+          "Responses connection ended before response.completed; no automatic retry was attempted.",
+        );
+      }
+    } catch (error) {
+      if (!streamFailure) execution.fail(error);
+      throw error;
+    } finally {
+      try {
+        const tail = resolveUnterminatedThought(thoughtState);
+        if (tail.text && execution.isActive()) {
+          if (tail.asAnswer) {
+            fullText += tail.text;
+            await execution.wait(() => onDelta(tail.text));
+          } else if (onReasoning) {
+            await execution.wait(() => onReasoning({ details: tail.text }));
+          }
+        }
+      } catch (error) {
+        tailCallbackFailed = true;
+        tailCallbackError = error;
+        // A consumer callback must not replace an explicit provider failure.
+        if (streamFailure) {
+          appLogger.warn("LLM responses stream tail callback error:", error);
+        }
+      } finally {
+        try {
+          void reader.cancel().catch(() => {});
+        } finally {
+          reader.releaseLock();
         }
       }
     }
-  } finally {
-    const tail = resolveUnterminatedThought(thoughtState);
-    if (tail.text) {
-      if (tail.asAnswer) {
-        fullText += tail.text;
-        onDelta(tail.text);
-      } else if (onReasoning) {
-        onReasoning({ details: tail.text });
-      }
-    }
-    reader.releaseLock();
-  }
 
-  return modelTurnOutcome(
-    fullText,
-    completion,
-    completion.status === "incomplete" && responseId
-      ? { responseId }
-      : undefined,
-  );
+    // Propagate a genuine callback failure only after reader cleanup. A main
+    // error already in flight (including streamFailure) takes precedence.
+    if (tailCallbackFailed) throw tailCallbackError;
+
+    return {
+      ...modelTurnOutcome(
+        fullText,
+        completion,
+        completion.status === "incomplete" && responseId
+          ? { responseId }
+          : undefined,
+      ),
+      ...(sawCompleted && richWidgets.length ? { richWidgets } : {}),
+    };
+  });
 }

@@ -44,6 +44,7 @@ describe("Agent preference tab layout", function () {
       'data-llm-agent-row="codex"',
       'data-llm-agent-row="claude"',
       'data-llm-agent-row="notes"',
+      'data-llm-agent-row="saved-files"',
     ]);
 
     // Every row carries a disclosure button and a live summary line, so the
@@ -106,6 +107,7 @@ describe("Agent preference tab layout", function () {
       codexRow.indexOf('class="llm-pref-advanced"'),
     );
     assert.include(codexAdvanced, 'id="__addonRef__-codex-app-server-path"');
+    assert.include(codexAdvanced, 'id="__addonRef__-codex-home"');
 
     const claudeAdvanced = claudeRow.slice(
       claudeRow.indexOf('class="llm-pref-advanced"'),

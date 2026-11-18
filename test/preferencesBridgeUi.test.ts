@@ -3,8 +3,136 @@ import { describe, it } from "mocha";
 import { readFileSync } from "node:fs";
 import { t } from "../src/utils/i18n";
 import { getOriginalPermissionOptions } from "../src/shared/permissionOptions";
+import ts from "typescript";
+
+// Exercise the shipped nested refresh bodies without importing the Zotero
+// preferences window or launching its backends. This is not live GUI evidence.
+function refreshHarness(name: string) {
+  const source = ts.createSourceFile(
+    "preferenceScript.ts",
+    readFileSync("src/modules/preferenceScript.ts", "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  let body = "";
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === name) {
+      body = node.initializer!.getText(source);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.isNotEmpty(body);
+  const state = { enabled: false, applied: 0 };
+  const select = {
+    disabled: false,
+    value: "customized",
+    setAttribute: () => {},
+    replaceChildren: () => {},
+  };
+  const button = { disabled: false };
+  const status = { textContent: "", style: { color: "" }, title: "" };
+  const requests: Array<(value: unknown) => void> = [];
+  const fetchCatalog = () => new Promise((resolve) => requests.push(resolve));
+  const deps = {
+    CLAUDE_CUSTOMIZED_MODEL_OPTION_KEY: "customized",
+    isCodexAppServerModeEnabled: () => state.enabled,
+    isClaudeCodeModeEnabled: () => state.enabled,
+    codexPermissionProfileSelect: select,
+    codexPermissionProfileRefresh: button,
+    codexPermissionProfileStatus: status,
+    agentPermissionModeSelect: select,
+    claudePermissionModeRefresh: button,
+    claudePermissionModeStatus: status,
+    claudeCodeModelSelect: select,
+    claudeCodeModelRefreshButton: button,
+    claudeCodeModelStatus: status,
+    claudeCodeCustomModelInput: null,
+    doc: { activeElement: null },
+    getCodexPermissionOptionCatalog: fetchCatalog,
+    fetchClaudePermissionModeCatalog: fetchCatalog,
+    fetchClaudeModelCatalog: fetchCatalog,
+    getConfiguredCodexAppServerBinaryPath: () => "unused",
+    getClaudeBridgeUrl: () => "unused",
+    getClaudeSettingSourcesByPref: () => [],
+    getClaudeRuntimeModelPref: () => "unused",
+    getClaudePermissionModePref: () => "default",
+    getCodexPermissionStatusText: () => "unused",
+    shouldPreserveClaudeCustomModelDraft: () => false,
+    reconcileClaudePermissionMode: () => ({ selectedId: "default" }),
+    setClaudePermissionModePref: () =>
+      assert.fail("unexpected preference write"),
+    renderPermissionPreferenceOptions: () => {
+      state.applied++;
+      return true;
+    },
+    buildClaudeModelPreferenceOptions: () => [],
+    syncClaudeModelPreferenceUi: () => {
+      state.applied++;
+    },
+    renderClaudeModelCatalogStatus: (text: string) => {
+      status.textContent = text;
+    },
+    refreshAgentRowSummaries: () => {},
+    t: (text: string) => text,
+  };
+  const compiled = ts.transpileModule(`const refresh = ${body};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const refresh = new Function(
+    ...Object.keys(deps),
+    `let codexPermissionRefreshId = 0, claudePermissionRefreshId = 0,
+      claudeModelCatalogRequestId = 0, currentCodexPermissionCatalog = null,
+      claudeModelPreferenceOptions = [];
+     ${compiled}; return refresh;`,
+  )(...Object.values(deps)) as () => Promise<void>;
+  const catalog = {
+    models: [],
+    options: [],
+    selectedKey: "default",
+    state: { boundary: { kind: "profile", profileId: "default" } },
+    capabilities: { profiles: [], protocol: "profiles" },
+  };
+  return { state, select, button, status, requests, refresh, catalog };
+}
 
 describe("bridge settings UI behavior", function () {
+  for (const name of [
+    "refreshCodexPermissionOptions",
+    "refreshClaudePermissionOptions",
+    "refreshClaudeModelSuggestions",
+  ]) {
+    it(`${name}: disabled mode never requests a catalog`, async function () {
+      const h = refreshHarness(name);
+      await h.refresh();
+      assert.lengthOf(h.requests, 0);
+      assert.isTrue(h.select.disabled);
+      assert.isTrue(h.button.disabled);
+      assert.include(h.status.textContent, "off");
+    });
+
+    it(`${name}: disable invalidates old results and re-enable refreshes`, async function () {
+      const h = refreshHarness(name);
+      h.state.enabled = true;
+      const old = h.refresh();
+      assert.lengthOf(h.requests, 1);
+      h.state.enabled = false;
+      await h.refresh();
+      h.state.enabled = true;
+      const current = h.refresh();
+      assert.lengthOf(h.requests, 2);
+      h.requests[0](h.catalog);
+      await old;
+      assert.equal(h.state.applied, 0);
+      assert.isTrue(h.select.disabled);
+      assert.isTrue(h.button.disabled);
+      h.requests[1](h.catalog);
+      await current;
+      assert.equal(h.state.applied, 1);
+      assert.isFalse(h.select.disabled);
+      assert.isFalse(h.button.disabled);
+    });
+  }
   it("translates model input mode preference strings in Chinese locale", function () {
     const globalWithZotero = globalThis as typeof globalThis & {
       Zotero?: { locale?: string };

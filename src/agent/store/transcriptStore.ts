@@ -1,3 +1,4 @@
+import { isEphemeralConversationKey } from "../../shared/conversationKeySpace";
 import type { AgentModelContentPart, AgentModelMessage } from "../types";
 import { deleteIfPresent, type AgentPurgeDb } from "./inTransactionDelete";
 import {
@@ -151,6 +152,11 @@ function sanitizeMessageForTranscript(
     ...(message.role !== "system" && message.messageId
       ? { messageId: message.messageId }
       : {}),
+    ...(message.role === "user" &&
+    typeof message.executionId === "string" &&
+    message.executionId.trim()
+      ? { executionId: message.executionId }
+      : {}),
     ...(message.role === "assistant" && message.tool_calls
       ? { tool_calls: message.tool_calls }
       : {}),
@@ -297,7 +303,13 @@ async function hydrateTranscriptSegment(params: {
     if (
       isConversationKeyRetiredInMemory(conversationKey) ||
       areConversationWritesFrozen(conversationKey) ||
-      !isConversationWriteGenerationCurrent(conversationKey, expectedGeneration)
+      !isConversationWriteGenerationCurrent(
+        conversationKey,
+        expectedGeneration,
+      ) ||
+      // A newer hydration or write owns the segment now. This SELECT may
+      // have captured rows before that write committed in the same generation.
+      hydratedKeys.has(key)
     ) {
       return;
     }
@@ -420,6 +432,8 @@ export async function readAgentConversationAnswer(
 async function persistTranscriptSegment(
   segment: AgentTranscriptSegment,
 ): Promise<"persisted" | "unavailable" | "failed"> {
+  // A temporary side chat's key (reserved band) is never persisted.
+  if (isEphemeralConversationKey(segment.conversationKey)) return "unavailable";
   const dbReady = await ensureAgentTranscriptStore();
   const db = getDb();
   if (!dbReady || !db) return "unavailable";

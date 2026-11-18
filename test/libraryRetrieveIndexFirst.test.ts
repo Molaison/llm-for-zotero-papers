@@ -467,6 +467,36 @@ describe("library retrieve, index first (v2 rules)", function () {
     assert.equal(snippet!.matchMethod, "bm25");
   });
 
+  it("windows an index snippet around an inflection of the matched term, as BM25 counted it", async function () {
+    const filler = (n: number) =>
+      "Background sentence about other things. ".repeat(n);
+    const head = filler(40).slice(0, 1400);
+    const planted = "The calibration error stayed below one percent.";
+    const text = (head + planted + " " + filler(20)).slice(0, 2000);
+    assert.notInclude(text, "errors");
+    // The index reports the surface term the reader typed; the chunk only
+    // holds its singular, which shares the index term "error".
+    const stemHit = {
+      ...hit(11, 10, 5, 1, text),
+      matchedTerms: ["errors"],
+    };
+    const index = fakeIndex(() => ({
+      chunks: [stemHit],
+      papers: [paper(11, 10, 9, 1)],
+    }));
+    const rig = createRetrieveServiceRig({ papers: 1, textIndex: index });
+    const result = await rig.service.retrieve({
+      query: "calibration errors",
+      depth: "evidence",
+    });
+    const snippet = result.snippets.find(
+      (s) => s.itemId === "10" && s.chunkIndex === 5,
+    );
+    assert.isOk(snippet);
+    assert.include(snippet!.snippet, planted);
+    assert.isAtMost(snippet!.snippet.length, 360 * 2 + "error".length + 6);
+  });
+
   it("falls back to the query's tokens when a hit carries no matched terms, and to the chunk head when none occur", async function () {
     const text = `${"Unrelated opening words. ".repeat(60)}The entorhinal grid fires here. ${"Tail words. ".repeat(20)}`;
     const noTerms = {

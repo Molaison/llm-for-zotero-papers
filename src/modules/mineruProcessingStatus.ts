@@ -159,6 +159,20 @@ export async function runMineruTaskOnce<T>(
       }
       return task(report, active.controller?.signal);
     })
+    .catch((error) => {
+      // A stopped watcher may no longer own a UI callback to retire its dot.
+      // Only this shared task's cancellation may clear its processing status;
+      // a joined subscriber detaching must leave the other owner untouched.
+      if (
+        (error instanceof MineruCancelledError ||
+          active.controller?.signal.aborted) &&
+        activeTasks.get(attachmentId) === active &&
+        processingMap.get(attachmentId)?.status === "processing"
+      ) {
+        clearItemStatus(attachmentId);
+      }
+      throw error;
+    })
     .finally(() => {
       if (activeTasks.get(attachmentId) === active) {
         activeTasks.delete(attachmentId);
@@ -242,7 +256,7 @@ export type MineruStatus =
 export async function getMineruStatus(
   attachmentId: number,
 ): Promise<MineruStatus> {
-  const status = processingMap.get(attachmentId);
+  let status = processingMap.get(attachmentId);
   if (status?.status === "processing") {
     return "processing";
   }
@@ -253,11 +267,19 @@ export async function getMineruStatus(
       validateSyncedPackage: false,
     },
   );
+  if (processingMap.get(attachmentId) !== status) {
+    return getMineruStatus(attachmentId);
+  }
   if (availability.status !== "missing") {
     return "cached";
   }
 
-  if (await getMineruCheckpointProgress(attachmentId)) {
+  const progress = await getMineruCheckpointProgress(attachmentId);
+  if (processingMap.get(attachmentId) !== status) {
+    return getMineruStatus(attachmentId);
+  }
+  status = processingMap.get(attachmentId);
+  if (progress) {
     if (processingMap.get(attachmentId)?.status === "processing")
       return "processing";
     if (status?.status !== "partial") {

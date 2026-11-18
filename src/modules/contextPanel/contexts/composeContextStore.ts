@@ -13,8 +13,8 @@
  * - selected texts and their expanded-index / note-expanded flags are keyed
  *   by the text-context conversation key (callers name the parameter
  *   `itemId`, but they pass the conversation key);
- * - the initialized-conversation set is keyed by conversation key; older
- *   entries keyed by item id remain readable during restoration;
+ * - the initialized-conversation set receives both item ids and
+ *   conversation keys, depending on the writer;
  * - per-paper send-mode and source-mode overrides are keyed by
  *   `ownerScopedPaperKey(ownerItemId, paper)`.
  */
@@ -28,6 +28,7 @@ import type {
   PaperContextSendMode,
   SelectedTextContext,
   TagContextRef,
+  AttachedConversationRef,
 } from "../types";
 import {
   initializedConversationComposeContextKeys,
@@ -48,6 +49,7 @@ import {
   selectedPaperContextListExpandedCache,
   selectedPaperPreviewExpandedCache,
   selectedTagContextCache,
+  attachedConversationCache,
   selectedTextCache,
   selectedTextPreviewExpandedCache,
 } from "../state";
@@ -136,6 +138,10 @@ export const composeContextStore = {
   otherRefs: listSlot<OtherContextRef>(selectedOtherRefContextCache),
   collections: listSlot<CollectionContextRef>(selectedCollectionContextCache),
   tags: listSlot<TagContextRef>(selectedTagContextCache),
+  /** Past chats attached to the next message; cleared after send. */
+  attachedConversations: listSlot<AttachedConversationRef>(
+    attachedConversationCache,
+  ),
   /** The contextItemId of the sticky paper chip, or false for none. */
   paperPreviewExpanded: ownerSlot<number | false>(
     selectedPaperPreviewExpandedCache,
@@ -169,7 +175,8 @@ export const composeContextStore = {
 
   /**
    * Owners whose paper/collection/tag composer state is set up. Membership
-   * counts even when every list is empty. New writes use conversation keys.
+   * counts even when every list is empty. Writers mark item ids and
+   * conversation keys.
    */
   initializedConversations: {
     has: (key: number): boolean =>

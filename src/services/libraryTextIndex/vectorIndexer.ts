@@ -53,7 +53,8 @@ const matrices = new Map<string, LibraryVectorMatrix>();
 const loading = new Map<string, Promise<LibraryVectorMatrix | null>>();
 /** Embedding dimensions per cache key, hydrated from index_meta. */
 const knownDims = new Map<string, number>();
-const hydratedStores = new WeakSet<LibraryTextIndexStore>();
+let hydratedStores = new WeakSet<LibraryTextIndexStore>();
+let vectorStateGeneration = 0;
 let pruneFailureLogged = false;
 
 export function isVectorsPrefOn(): boolean {
@@ -93,7 +94,10 @@ export async function loadVectorDims(
   store: LibraryTextIndexStore,
 ): Promise<void> {
   if (hydratedStores.has(store)) return;
-  for (const [key, value] of await store.listIndexMeta(DIMS_META_PREFIX)) {
+  const generation = vectorStateGeneration;
+  const entries = await store.listIndexMeta(DIMS_META_PREFIX);
+  if (generation !== vectorStateGeneration) return;
+  for (const [key, value] of entries) {
     const dims = Number(value);
     if (Number.isInteger(dims) && dims > 0)
       knownDims.set(key.slice(DIMS_META_PREFIX.length), dims);
@@ -229,33 +233,51 @@ export function loadVectorMatrix(
 ): Promise<LibraryVectorMatrix | null> {
   const pending = loading.get(namespace);
   if (pending) return pending;
-  const load = (async () => {
-    const rows = await store.listVectorDocuments(namespace);
-    if (!rows.length) return null;
-    const dims = namespaceDims(namespace) ?? rows[0].dims;
-    const entries: VectorMatrixEntry[] = [];
-    for (const row of rows) {
-      const shard = await readVectorShard(row.path);
+  const generation = vectorStateGeneration;
+  const load: Promise<LibraryVectorMatrix | null> = Promise.resolve().then(
+    async () => {
+      const rows = await store.listVectorDocuments(namespace);
       if (
-        !shard ||
-        shard.dims !== dims ||
-        shard.vectors.length !== row.chunkCount
-      ) {
-        await store.deleteVectorDocument(row.attachmentId, namespace);
-        continue;
+        generation !== vectorStateGeneration ||
+        loading.get(namespace) !== load
+      )
+        return null;
+      if (!rows.length) return null;
+      const dims = namespaceDims(namespace) ?? rows[0].dims;
+      const entries: VectorMatrixEntry[] = [];
+      for (const row of rows) {
+        const shard = await readVectorShard(row.path);
+        if (
+          generation !== vectorStateGeneration ||
+          loading.get(namespace) !== load
+        )
+          return null;
+        if (
+          !shard ||
+          shard.dims !== dims ||
+          shard.vectors.length !== row.chunkCount
+        ) {
+          await store.deleteVectorDocument(row.attachmentId, namespace);
+          continue;
+        }
+        entries.push({
+          attachmentId: row.attachmentId,
+          chunkCount: shard.vectors.length,
+          vectors: shard.vectors,
+        });
       }
-      entries.push({
-        attachmentId: row.attachmentId,
-        chunkCount: shard.vectors.length,
-        vectors: shard.vectors,
-      });
-    }
-    if (!entries.length) return null;
-    const matrix = new LibraryVectorMatrix(dims);
-    matrix.addDocuments(entries);
-    matrices.set(namespace, matrix);
-    return matrix;
-  })();
+      if (
+        generation !== vectorStateGeneration ||
+        loading.get(namespace) !== load ||
+        !entries.length
+      )
+        return null;
+      const matrix = new LibraryVectorMatrix(dims);
+      matrix.addDocuments(entries);
+      matrices.set(namespace, matrix);
+      return matrix;
+    },
+  );
   loading.set(namespace, load);
   return load.finally(() => {
     if (loading.get(namespace) === load) loading.delete(namespace);
@@ -284,6 +306,7 @@ export async function pruneVectorNamespaces(
   );
   const removed: string[] = [];
   for (const namespace of stale) {
+    loading.delete(namespace);
     matrices.delete(namespace);
     try {
       await removeVectorNamespace(namespace);
@@ -334,6 +357,7 @@ export async function removeDocumentVectors(
   rows: Array<{ attachmentId: number; namespace: string; path: string }>,
 ): Promise<void> {
   for (const row of rows) {
+    loading.delete(row.namespace);
     matrices.get(row.namespace)?.removeDocument(row.attachmentId);
     let path = "";
     try {
@@ -353,6 +377,8 @@ export async function removeDocumentVectors(
  * index files are deleted underneath them (clear/rebuild).
  */
 export function clearLoadedVectorState(): void {
+  vectorStateGeneration += 1;
+  hydratedStores = new WeakSet<LibraryTextIndexStore>();
   matrices.clear();
   loading.clear();
   knownDims.clear();

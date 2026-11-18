@@ -57,6 +57,8 @@ export function appendContinuationText(
 }
 
 export async function callDirectChatTurnWithRecovery(params: {
+  /** Stateful remote sessions and frozen annotation batches dispatch only once. */
+  allowAutomaticRecovery?: boolean;
   request: ChatParams;
   onDelta: (delta: string) => void;
   onReasoning?: (event: ReasoningEvent) => void;
@@ -71,6 +73,7 @@ export async function callDirectChatTurnWithRecovery(params: {
     params.onUsage,
   );
   if (
+    params.allowAutomaticRecovery === false ||
     first.completion.status !== "incomplete" ||
     first.completion.reason !== "output_limit" ||
     first.text.trim()

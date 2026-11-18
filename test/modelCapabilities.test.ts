@@ -11,6 +11,7 @@ import {
   refreshModelCatalog,
   resetModelCapabilityStateForTests,
   setModelCapabilityRegistryForTests,
+  subscribeModelCapabilities,
   type ModelCapabilityRegistry,
 } from "../src/modelCapabilities";
 import {
@@ -200,6 +201,103 @@ describe("model capability service", function () {
     assert.isNull(compileReasoningControls(capabilities, { level: "none" }));
   });
 
+  it("omits temperature from a declared control when the model fixes sampling", function () {
+    const registry: ModelCapabilityRegistry = {
+      schemaVersion: 1,
+      revision: 3,
+      models: [
+        {
+          match: { provider: "anthropic", exact: "claude-fixed-sampling" },
+          reasoning: {
+            kind: "select",
+            options: [
+              {
+                id: "none",
+                label: "Off",
+                controls: { body: { thinking: { type: "disabled" } } },
+              },
+            ],
+          },
+          sampling: { temperature: "unsupported" },
+        },
+      ],
+    };
+    assert.isTrue(setModelCapabilityRegistryForTests(registry));
+    const capabilities = getModelCapabilities({
+      provider: "anthropic",
+      model: "claude-fixed-sampling",
+      apiBase: "https://api.anthropic.com/v1",
+      protocol: "anthropic_messages",
+    });
+
+    // The option itself says nothing about temperature; the model's sampling
+    // contract still has to keep it out of the request.
+    assert.deepEqual(
+      compileReasoningControls(capabilities, { level: "none" }),
+      {
+        extra: { thinking: { type: "disabled" } },
+        omitTemperature: true,
+      },
+    );
+  });
+
+  it("knows Claude Haiku 5.5 rejects temperature, and keeps Haiku 4.5 configurable", function () {
+    // https://platform.claude.com/docs/en/build-with-claude/thinking — on
+    // Haiku 5.5 a non-default temperature returns a 400 on every request.
+    const haiku55 = getModelCapabilities({
+      provider: "anthropic",
+      model: "claude-haiku-5-5",
+      apiBase: "https://api.anthropic.com/v1",
+      protocol: "anthropic_messages",
+    });
+    assert.equal(haiku55.sampling.temperature, "unsupported");
+    // 200k, not the API's 1M: tool views are sized from this limit, and a
+    // 1M limit pushed library-wide views past Haiku's 100k-token price tier.
+    assert.equal(haiku55.limits.contextWindowTokens, 200_000);
+    assert.equal(haiku55.limits.inputTokens, 200_000);
+    assert.equal(haiku55.limits.outputTokens, 128_000);
+    // Sampling data must not displace the hand-maintained reasoning profile.
+    assert.equal(haiku55.provenance.reasoning, "legacy");
+    // Haiku 5.5 is the one 5.x model that may switch thinking off.
+    assert.deepEqual(
+      getModelReasoningChoices(haiku55).map((choice) => choice.label),
+      ["Auto", "low", "medium", "high", "max", "Off"],
+    );
+    const opus55 = getModelCapabilities({
+      provider: "anthropic",
+      model: "claude-opus-5-5",
+      apiBase: "https://api.anthropic.com/v1",
+      protocol: "anthropic_messages",
+    });
+    assert.deepEqual(
+      getModelReasoningChoices(opus55).map((choice) => choice.label),
+      ["Auto", "low", "medium", "high", "xhigh", "max"],
+    );
+
+    const haiku45 = getModelCapabilities({
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+      apiBase: "https://api.anthropic.com/v1",
+      protocol: "anthropic_messages",
+    });
+    assert.equal(haiku45.sampling.temperature, "configurable");
+
+    for (const model of [
+      "claude-haiku-5-5@20261001",
+      "claude-haiku-5-5-20261001",
+      "anthropic/claude-haiku-5-5",
+    ]) {
+      const dated = getModelCapabilities({
+        provider: "anthropic",
+        model,
+        apiBase: "https://api.anthropic.com/v1",
+        protocol: "anthropic_messages",
+      });
+      assert.equal(dated.sampling.temperature, "unsupported", model);
+      assert.equal(dated.limits.contextWindowTokens, 200_000, model);
+    }
+  });
+
   it("uses live model metadata and preserves exact opaque model IDs", async function () {
     configureModelCapabilityRuntime({
       fetch: (async () =>
@@ -306,6 +404,82 @@ describe("model capability service", function () {
       capabilities.reasoning.options.map((option) => option.id),
       ["ultra"],
     );
+  });
+
+  describe("failed refreshes", function () {
+    const identity = {
+      provider: "kimi",
+      model: "kimi-v4",
+      apiBase: "https://api.moonshot.ai/v1",
+      protocol: "openai_chat_compat",
+      apiKey: "secret-for-test",
+    } as const;
+
+    it("waits 10 s before retrying a failed catalog fetch unless forced", async function () {
+      let clock = 1_000_000;
+      let fetches = 0;
+      configureModelCapabilityRuntime({
+        now: () => clock,
+        fetch: (async () => {
+          fetches += 1;
+          throw new Error("offline");
+        }) as typeof fetch,
+      });
+      await refreshModelCatalog(identity);
+      await refreshModelCatalog(identity);
+      clock += 5_000;
+      await refreshModelCatalog(identity);
+      assert.equal(fetches, 1);
+      await refreshModelCatalog(identity, { force: true });
+      assert.equal(fetches, 2);
+      clock += 11_000;
+      await refreshModelCatalog(identity);
+      assert.equal(fetches, 3);
+    });
+
+    it("does not notify again when a repeated failure changes nothing", async function () {
+      let clock = 1_000_000;
+      configureModelCapabilityRuntime({
+        now: () => clock,
+        fetch: (async () => {
+          throw new Error("offline");
+        }) as typeof fetch,
+      });
+      let notifications = 0;
+      const unsubscribe = subscribeModelCapabilities(() => {
+        notifications += 1;
+      });
+      try {
+        await refreshModelCatalog(identity);
+        assert.equal(notifications, 1);
+        clock += 61_000;
+        await refreshModelCatalog(identity);
+        await refreshModelCatalog(identity, { force: true });
+        assert.equal(notifications, 1);
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it("waits 60 s before retrying a failed registry fetch unless forced", async function () {
+      let clock = 1_000_000;
+      let fetches = 0;
+      configureModelCapabilityRuntime({
+        now: () => clock,
+        fetch: (async () => {
+          fetches += 1;
+          throw new Error("offline");
+        }) as typeof fetch,
+      });
+      assert.isFalse(await refreshModelCapabilityRegistry());
+      assert.isFalse(await refreshModelCapabilityRegistry());
+      assert.equal(fetches, 1);
+      clock += 61_000;
+      await refreshModelCapabilityRegistry();
+      assert.equal(fetches, 2);
+      await refreshModelCapabilityRegistry({ force: true });
+      assert.equal(fetches, 3);
+    });
   });
 
   it("accepts a newer validated remote registry revision", async function () {

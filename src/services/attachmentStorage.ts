@@ -261,7 +261,11 @@ async function ensureBlobTable(): Promise<void> {
           created_at INTEGER NOT NULL
         )`,
       );
-    })();
+    })().catch((error) => {
+      // A transient SQL failure must not poison every later attachment import.
+      blobTableInitTask = null;
+      throw error;
+    });
   }
   await blobTableInitTask;
 }

@@ -5,6 +5,7 @@ import {
   postWithReasoningFallback,
   resolveRequestAuthState,
   uploadFilesForResponses,
+  readLocalFileBytes,
   type ChatFileAttachment,
 } from "../../utils/llmClient";
 import { normalizeTemperature } from "../../utils/normalization";
@@ -29,8 +30,14 @@ import {
   type ResponsesPayload,
   normalizeResponsesStepFromPayload,
   parseResponsesStepStream,
+  replayableResponsesOutputItems,
+  withoutTrailingReasoningItems,
 } from "./responsesShared";
-import { buildResponsesFunctionTools } from "./shared";
+import { buildResponsesFunctionTools, encodeBytesBase64 } from "./shared";
+import {
+  createResponsesPdfPreparation,
+  isResponsesPdfAttachment,
+} from "../../utils/responsesPdfInputs";
 import { resolveRequestContentInputs } from "./messageBuilder";
 
 async function uploadFilePart(
@@ -71,7 +78,7 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       streaming: true,
       toolCalls: true,
       contentInputs,
-      fileInputs: contentInputs.nativeFiles,
+      fileInputs: contentInputs.nativeFiles || contentInputs.pdfDocuments,
       reasoning: true,
     });
   }
@@ -91,9 +98,31 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       apiKey: request.apiKey || "",
       signal: params.signal,
     });
-    const initialInput = await buildResponsesInitialInput(params.messages, {
-      resolveFilePart: async (part, signal) =>
-        uploadFilePart(part, request, signal),
+    const pdf = createResponsesPdfPreparation({
+      model: request.model || "",
+      apiBase: request.apiBase,
+      protocol: "responses_api",
+      authMode: request.authMode || "api_key",
+      inputMode: request.advanced?.inputMode,
+      signal: params.signal,
+      readBytes: readLocalFileBytes,
+      encodeBase64: encodeBytesBase64,
+    });
+    const resolveFilePart = async (
+      part: Extract<AgentModelContentPart, { type: "file_ref" }>,
+      signal?: AbortSignal,
+    ) =>
+      isResponsesPdfAttachment(part.file_ref)
+        ? [await pdf.prepareFile(part.file_ref)]
+        : uploadFilePart(part, request, signal);
+    // Replayed wire already contains the bytes: do not reopen historical
+    // paths or encode a second, discarded initial input on tool continuation.
+    const initialMessages = this.conversationItems
+      ? params.messages.filter((message) => message.role === "system")
+      : params.messages;
+    const initialInput = await buildResponsesInitialInput(initialMessages, {
+      resolveFilePart,
+      inlinePdf: true,
       signal: params.signal,
     });
     const instructions =
@@ -103,8 +132,8 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       ? await buildResponsesContinuationInput(
           params.continuationMessages || [],
           {
-            resolveFilePart: async (part, signal) =>
-              uploadFilePart(part, request, signal),
+            resolveFilePart,
+            inlinePdf: true,
             signal: params.signal,
           },
         )
@@ -112,6 +141,7 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
     const inputItems = this.conversationItems
       ? [...this.conversationItems, ...followupInput]
       : initialInput.input;
+    const hasInlinePdf = pdf.validateWireInput(inputItems);
     const url = resolveProviderTransportEndpoint({
       protocol: "responses_api",
       apiBase: request.apiBase || "",
@@ -130,6 +160,7 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       url,
       scope: { conversationKey: request.conversationKey },
       auth,
+      allowAutomaticRetry: hasInlinePdf ? false : undefined,
       modelName: request.model,
       initialReasoning: request.reasoning,
       buildPayload: (reasoningOverride) => {
@@ -148,7 +179,7 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
           ...buildPromptCachePayloadHints(request.contextCache),
           include: ["reasoning.encrypted_content"],
           tools: buildResponsesFunctionTools(params.tools),
-          tool_choice: "auto",
+          tool_choice: params.toolChoice === "none" ? "none" : "auto",
           store: false,
           stream: true,
           ...(outputPolicy.mode === "numeric"
@@ -180,15 +211,19 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
       normalized.completion,
     );
     if (recoveryReason) {
+      // A reasoning item must not end the replayed items: the recovery
+      // message would follow it, and the provider rejects that request.
       this.conversationItems = [
         ...inputItems,
-        ...normalized.outputItems.filter((item) => {
-          if (!item || typeof item !== "object") return true;
-          const type = String(
-            (item as { type?: unknown }).type ?? "",
-          ).toLowerCase();
-          return type !== "function_call" && type !== "tool_call";
-        }),
+        ...withoutTrailingReasoningItems(
+          normalized.outputItems.filter((item) => {
+            if (!item || typeof item !== "object") return true;
+            const type = String(
+              (item as { type?: unknown }).type ?? "",
+            ).toLowerCase();
+            return type !== "function_call" && type !== "tool_call";
+          }),
+        ),
       ];
       return {
         kind: "incomplete",
@@ -205,7 +240,10 @@ export class OpenAIResponsesAgentAdapter implements AgentModelAdapter {
         },
       };
     }
-    this.conversationItems = [...inputItems, ...normalized.outputItems];
+    this.conversationItems = [
+      ...inputItems,
+      ...replayableResponsesOutputItems(normalized),
+    ];
     if (normalized.toolCalls.length) {
       return {
         kind: "tool_calls",
