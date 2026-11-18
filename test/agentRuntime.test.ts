@@ -6915,7 +6915,8 @@ describe("AgentRuntime", function () {
       const budgetEvent = events.find(
         (event) =>
           event.type === "provider_event" &&
-          event.providerType === "agent_context_budget",
+          event.providerType === "agent_context_budget" &&
+          event.payload?.action === "compacted_model_prompt",
       );
       assert.exists(budgetEvent);
       assert.equal(

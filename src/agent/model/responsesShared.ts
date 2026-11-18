@@ -1,3 +1,4 @@
+import { RequestExecution } from "../../utils/requestExecution";
 import {
   createFallbackToolCallId,
   groupToolContinuationMessages,
@@ -560,124 +561,128 @@ export async function parseResponsesStepStream(
   onTextDelta?: (delta: string) => void | Promise<void>,
   onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
   onUsage?: (usage: UsageStats) => void | Promise<void>,
+  options: { signal?: AbortSignal; stopAtTerminal?: boolean } = {},
 ): Promise<NormalizedResponsesStep> {
-  const reader = stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let responseId: string | undefined;
-  let latestPayload: ResponsesPayload | null = null;
-  let streamedText = "";
-  const streamedOutputs: ResponsesOutputItem[] = [];
-  const eventTypesSeen = new Set<string>();
-  let sawAnswerDelta = false;
-  let sawAnswerFinal = false;
-  let sawSummaryDelta = false;
-  let sawSummaryFinal = false;
-  let sawDetailsDelta = false;
-  let sawDetailsFinal = false;
-  // Set by a `response.failed` or `error` event; thrown after the read
-  // loop, outside the per-event parse guard that skips malformed lines.
-  let streamError: Error | null = null;
+  const execution = new RequestExecution(undefined, options.signal);
+  return execution.run(async () => {
+    const reader =
+      stream.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let responseId: string | undefined;
+    let latestPayload: ResponsesPayload | null = null;
+    let streamedText = "";
+    const streamedOutputs: ResponsesOutputItem[] = [];
+    const eventTypesSeen = new Set<string>();
+    let sawAnswerDelta = false;
+    let sawAnswerFinal = false;
+    let sawSummaryDelta = false;
+    let sawSummaryFinal = false;
+    let sawDetailsDelta = false;
+    let sawDetailsFinal = false;
+    // Set by a `response.failed` or `error` event; thrown after the read
+    // loop, outside the per-event parse guard that skips malformed lines.
+    let streamError: Error | null = null;
 
-  const mergeOutputItem = (item: unknown) => {
-    if (!item || typeof item !== "object") return;
-    const normalizedItem = item as ResponsesOutputItem;
-    const key = getResponseOutputItemKey(normalizedItem);
-    if (!key) {
-      streamedOutputs.push(normalizedItem);
-      return;
-    }
-    const existingIndex = streamedOutputs.findIndex(
-      (entry) => getResponseOutputItemKey(entry) === key,
-    );
-    if (existingIndex >= 0) {
-      streamedOutputs[existingIndex] = normalizedItem;
-      return;
-    }
-    streamedOutputs.push(normalizedItem);
-  };
-
-  const emitReasoning = async (event: ReasoningEvent) => {
-    if (!onReasoning) return;
-    const summary =
-      typeof event.summary === "string" && event.summary.length > 0
-        ? event.summary
-        : undefined;
-    const details =
-      typeof event.details === "string" && event.details.length > 0
-        ? event.details
-        : undefined;
-    if (!summary && !details) return;
-    await onReasoning({ summary, details });
-  };
-
-  const emitAnswer = async (
-    value: unknown,
-    mode: "delta" | "final",
-  ): Promise<void> => {
-    const text =
-      extractOutputTextFromContent(value) || normalizeResponsesText(value);
-    if (!text) return;
-    if (mode === "delta" && sawAnswerFinal) return;
-    if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
-    if (mode === "delta") {
-      sawAnswerDelta = true;
-    } else {
-      sawAnswerFinal = true;
-    }
-    streamedText += text;
-    if (onTextDelta) {
-      await onTextDelta(text);
-    }
-  };
-
-  const emitReasoningFromOutputItem = async (value: unknown) => {
-    if (!value || typeof value !== "object") return;
-    const row = value as {
-      type?: unknown;
-      summary?: unknown;
-      content?: unknown;
-      text?: unknown;
-      reasoning?: unknown;
-    };
-    const typeValue =
-      typeof row.type === "string" ? row.type.toLowerCase() : "";
-    if (typeValue !== "reasoning") return;
-    if (!sawSummaryDelta && !sawSummaryFinal) {
-      await emitReasoning({ summary: extractReasoningSummary(row.summary) });
-    }
-    if (!sawDetailsDelta && !sawDetailsFinal) {
-      await emitReasoning({
-        details:
-          normalizeReasoningText(row.content) ||
-          normalizeReasoningText(row.reasoning) ||
-          normalizeReasoningText(row.text),
-      });
-    }
-  };
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      // At the end of the stream the unfinished line is the last line: a
-      // final event without a trailing newline is still an event.
-      let lines: string[];
-      if (done) {
-        lines = [buffer + decoder.decode()];
-        buffer = "";
-      } else {
-        buffer += decoder.decode(value, { stream: true });
-        lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+    const mergeOutputItem = (item: unknown) => {
+      if (!item || typeof item !== "object") return;
+      const normalizedItem = item as ResponsesOutputItem;
+      const key = getResponseOutputItemKey(normalizedItem);
+      if (!key) {
+        streamedOutputs.push(normalizedItem);
+        return;
       }
+      const existingIndex = streamedOutputs.findIndex(
+        (entry) => getResponseOutputItemKey(entry) === key,
+      );
+      if (existingIndex >= 0) {
+        streamedOutputs[existingIndex] = normalizedItem;
+        return;
+      }
+      streamedOutputs.push(normalizedItem);
+    };
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(data) as {
+    const emitReasoning = async (event: ReasoningEvent) => {
+      if (!onReasoning) return;
+      const summary =
+        typeof event.summary === "string" && event.summary.length > 0
+          ? event.summary
+          : undefined;
+      const details =
+        typeof event.details === "string" && event.details.length > 0
+          ? event.details
+          : undefined;
+      if (!summary && !details) return;
+      await execution.wait(() => onReasoning({ summary, details }));
+    };
+
+    const emitAnswer = async (
+      value: unknown,
+      mode: "delta" | "final",
+    ): Promise<void> => {
+      const text =
+        extractOutputTextFromContent(value) || normalizeResponsesText(value);
+      if (!text) return;
+      if (mode === "delta" && sawAnswerFinal) return;
+      if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
+      if (mode === "delta") {
+        sawAnswerDelta = true;
+      } else {
+        sawAnswerFinal = true;
+      }
+      streamedText += text;
+      if (onTextDelta) {
+        await execution.wait(() => onTextDelta(text));
+      }
+    };
+
+    const emitReasoningFromOutputItem = async (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const row = value as {
+        type?: unknown;
+        summary?: unknown;
+        content?: unknown;
+        text?: unknown;
+        reasoning?: unknown;
+      };
+      const typeValue =
+        typeof row.type === "string" ? row.type.toLowerCase() : "";
+      if (typeValue !== "reasoning") return;
+      if (!sawSummaryDelta && !sawSummaryFinal) {
+        await emitReasoning({ summary: extractReasoningSummary(row.summary) });
+      }
+      if (!sawDetailsDelta && !sawDetailsFinal) {
+        await emitReasoning({
+          details:
+            normalizeReasoningText(row.content) ||
+            normalizeReasoningText(row.reasoning) ||
+            normalizeReasoningText(row.text),
+        });
+      }
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await execution.wait(() => reader.read());
+        // At the end of the stream the unfinished line is the last line: a
+        // final event without a trailing newline is still an event.
+        let lines: string[];
+        if (done) {
+          lines = [buffer + decoder.decode()];
+          buffer = "";
+        } else {
+          buffer += decoder.decode(value, { stream: true });
+          lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+        }
+
+        for (const line of lines) {
+          execution.assertActive();
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          let parsed: {
             type?: unknown;
             delta?: unknown;
             text?: unknown;
@@ -693,6 +698,11 @@ export async function parseResponsesStepStream(
             };
             response?: ResponsesPayload;
           };
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            continue;
+          }
           const eventType =
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
           if (eventType) eventTypesSeen.add(eventType);
@@ -889,6 +899,18 @@ export async function parseResponsesStepStream(
               eventType === "response.incomplete") &&
             parsed.response
           ) {
+            if (
+              options.stopAtTerminal &&
+              parsed.response.status &&
+              parsed.response.status !==
+                (eventType === "response.completed"
+                  ? "completed"
+                  : "incomplete")
+            ) {
+              throw new Error(
+                "Responses terminal event has an invalid response status.",
+              );
+            }
             latestPayload = parsed.response;
             if (
               typeof parsed.response.id === "string" &&
@@ -933,104 +955,106 @@ export async function parseResponsesStepStream(
                     : 0);
             if (onUsage && totalTokens > 0) {
               const cacheUsage = extractContextCacheUsage(usage);
-              await onUsage({
-                promptTokens:
-                  typeof usage?.input_tokens === "number"
-                    ? usage.input_tokens
-                    : 0,
-                completionTokens:
-                  typeof usage?.output_tokens === "number"
-                    ? usage.output_tokens
-                    : 0,
-                totalTokens,
-                ...cacheUsage,
-                ...(typeof usage?.input_tokens === "number"
-                  ? {
-                      contextTokens: usage.input_tokens,
-                      contextWindowIsAuthoritative: true,
-                    }
-                  : {}),
-              });
+              await execution.wait(() =>
+                onUsage({
+                  promptTokens:
+                    typeof usage?.input_tokens === "number"
+                      ? usage.input_tokens
+                      : 0,
+                  completionTokens:
+                    typeof usage?.output_tokens === "number"
+                      ? usage.output_tokens
+                      : 0,
+                  totalTokens,
+                  ...cacheUsage,
+                  ...(typeof usage?.input_tokens === "number"
+                    ? {
+                        contextTokens: usage.input_tokens,
+                        contextWindowIsAuthoritative: true,
+                      }
+                    : {}),
+                }),
+              );
             }
+            if (options.stopAtTerminal) break;
           }
-        } catch (_error) {
-          continue;
         }
+        if (streamError || done || (options.stopAtTerminal && latestPayload))
+          break;
       }
-      if (streamError || done) break;
+    } finally {
+      void reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
-  } finally {
-    if (streamError) void reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-  if (streamError) throw streamError;
+    if (streamError) throw streamError;
 
-  if (latestPayload) {
-    const normalized = normalizeResponsesStepFromPayload(latestPayload);
-    const outputItems = mergeResponseOutputItems(
-      normalized.outputItems,
-      streamedOutputs,
-    );
+    if (latestPayload) {
+      const normalized = normalizeResponsesStepFromPayload(latestPayload);
+      const outputItems = mergeResponseOutputItems(
+        normalized.outputItems,
+        streamedOutputs,
+      );
+      const finalText =
+        normalized.text ||
+        streamedText.trim() ||
+        extractOutputText(outputItems).trim();
+      if (!finalText && (outputItems.length || eventTypesSeen.size > 0)) {
+        logEmptyResponse(
+          "LLM Agent: Empty responses step after completed payload",
+          {
+            responseId: normalized.responseId || responseId,
+            eventTypes: Array.from(eventTypesSeen),
+            outputItemTypes: outputItems
+              .map((item) =>
+                item && typeof item === "object"
+                  ? (item as { type?: unknown }).type
+                  : undefined,
+              )
+              .filter(Boolean),
+            hasOutputText:
+              Boolean(
+                latestPayload.output_text &&
+                normalizeResponsesText(latestPayload.output_text),
+              ) || false,
+          },
+        );
+      }
+      return {
+        responseId: normalized.responseId || responseId,
+        text: finalText,
+        toolCalls: extractToolCallsFromOutputs(outputItems),
+        outputItems,
+        completion: normalized.completion,
+      };
+    }
+
+    const toolCalls = extractToolCallsFromOutputs(streamedOutputs);
     const finalText =
-      normalized.text ||
-      streamedText.trim() ||
-      extractOutputText(outputItems).trim();
-    if (!finalText && (outputItems.length || eventTypesSeen.size > 0)) {
+      streamedText.trim() || extractOutputText(streamedOutputs).trim();
+    if (!finalText && !toolCalls.length) {
+      // No completed response and nothing to use (reasoning at most): the
+      // stream broke before the step finished. Some relays never send
+      // `response.completed`, so a stream with text or a tool call is kept.
       logEmptyResponse(
-        "LLM Agent: Empty responses step after completed payload",
+        "LLM Agent: Responses stream ended before the response finished",
         {
-          responseId: normalized.responseId || responseId,
+          responseId,
           eventTypes: Array.from(eventTypesSeen),
-          outputItemTypes: outputItems
-            .map((item) =>
-              item && typeof item === "object"
-                ? (item as { type?: unknown }).type
-                : undefined,
-            )
+          outputItemTypes: streamedOutputs
+            .map((item) => item.type)
             .filter(Boolean),
-          hasOutputText:
-            Boolean(
-              latestPayload.output_text &&
-              normalizeResponsesText(latestPayload.output_text),
-            ) || false,
         },
+      );
+      throw new ModelStreamInterruptedError(
+        "The model stream ended before the response finished.",
       );
     }
     return {
-      responseId: normalized.responseId || responseId,
+      responseId,
       text: finalText,
-      toolCalls: extractToolCallsFromOutputs(outputItems),
-      outputItems,
-      completion: normalized.completion,
+      toolCalls,
+      outputItems: streamedOutputs,
+      completion: { status: "complete" },
     };
-  }
-
-  const toolCalls = extractToolCallsFromOutputs(streamedOutputs);
-  const finalText =
-    streamedText.trim() || extractOutputText(streamedOutputs).trim();
-  if (!finalText && !toolCalls.length) {
-    // No completed response and nothing to use (reasoning at most): the
-    // stream broke before the step finished. Some relays never send
-    // `response.completed`, so a stream with text or a tool call is kept.
-    logEmptyResponse(
-      "LLM Agent: Responses stream ended before the response finished",
-      {
-        responseId,
-        eventTypes: Array.from(eventTypesSeen),
-        outputItemTypes: streamedOutputs
-          .map((item) => item.type)
-          .filter(Boolean),
-      },
-    );
-    throw new ModelStreamInterruptedError(
-      "The model stream ended before the response finished.",
-    );
-  }
-  return {
-    responseId,
-    text: finalText,
-    toolCalls,
-    outputItems: streamedOutputs,
-    completion: { status: "complete" },
-  };
+  });
 }

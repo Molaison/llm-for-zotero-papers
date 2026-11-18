@@ -1,3 +1,4 @@
+import { assertNotAborted, waitForCodexTask } from "./lifecycle";
 import { getCodexHomePref } from "../utils/codexHomePref";
 import { getLocalParentPath, joinLocalPath } from "../utils/localPath";
 
@@ -66,12 +67,20 @@ export type CodexAuthSession = {
 
 export type CodexAuthDependencies = {
   authPath?: string;
+  refreshTimeoutMs?: number;
   fetchFn?: typeof fetch;
   readText?: (path: string) => Promise<string>;
   writeText?: (path: string, content: string) => Promise<void>;
 };
 
-const refreshTasksByAuthPath = new Map<string, Promise<CodexAuthSession>>();
+type CodexRefreshTask = {
+  phase: "preparing" | "committing" | "settling";
+  session: CodexAuthSession;
+  controller: AbortController;
+  promise: Promise<CodexAuthSession>;
+};
+
+const refreshTasksByAuthPath = new Map<string, CodexRefreshTask>();
 
 function getIOUtils(): IOUtilsLike | undefined {
   const direct = (globalThis as { IOUtils?: IOUtilsLike }).IOUtils;
@@ -210,17 +219,23 @@ async function ensureParentDirectory(path: string): Promise<void> {
   }
 }
 
-async function defaultWriteText(path: string, content: string): Promise<void> {
+async function defaultWriteText(
+  path: string,
+  content: string,
+  beginCommit: () => void,
+): Promise<void> {
   await ensureParentDirectory(path);
   const data = new TextEncoder().encode(content);
   const tmpPath = `${path}.llm-for-zotero.tmp`;
   const io = getIOUtils();
   if (io?.write) {
+    beginCommit();
     await io.write(path, data, { tmpPath });
     return;
   }
   const osFile = getOSFile();
   if (osFile?.writeAtomic) {
+    beginCommit();
     await osFile.writeAtomic(path, data, { tmpPath });
     return;
   }
@@ -275,20 +290,53 @@ function sessionFromAuthJson(
   };
 }
 
+export function isSameCodexAuthSession(
+  left: CodexAuthSession,
+  right: CodexAuthSession,
+): boolean {
+  if (
+    normalizeAuthPathKey(left.authPath) !== normalizeAuthPathKey(right.authPath)
+  )
+    return false;
+  if (left.accountId && right.accountId && left.accountId !== right.accountId)
+    return false;
+  if (!right.token && !right.refreshToken) return false;
+  return Boolean(
+    (left.token && left.token === right.token) ||
+    (left.refreshToken && left.refreshToken === right.refreshToken) ||
+    (left.accountId && left.accountId === right.accountId),
+  );
+}
+
+function assertSameSession(
+  left: CodexAuthSession,
+  right: CodexAuthSession,
+): void {
+  if (!isSameCodexAuthSession(left, right)) {
+    throw new Error(
+      "Codex login changed or signed out; please retry with the current login",
+    );
+  }
+}
+
 async function refreshCodexAuthSessionOnce(
   staleSession: CodexAuthSession,
   options: CodexAuthDependencies,
+  task: CodexRefreshTask,
+  assertOwner: () => void,
 ): Promise<CodexAuthSession> {
   const dependencies = { ...options, authPath: staleSession.authPath };
   const currentAuth = await loadCodexAuthJson(dependencies);
+  assertOwner();
   const currentSession = sessionFromAuthJson(
     staleSession.authPath,
     currentAuth,
   );
+  assertSameSession(staleSession, currentSession);
   if (currentSession.token && currentSession.token !== staleSession.token) {
     return currentSession;
   }
-  const refreshToken = currentSession.refreshToken || staleSession.refreshToken;
+  const refreshToken = currentSession.refreshToken;
   if (!refreshToken) {
     throw new Error(
       "codex auth refresh token missing. Please run `codex login` to restore ~/.codex/auth.json.",
@@ -303,24 +351,28 @@ async function refreshCodexAuthSessionOnce(
       grant_type: "refresh_token",
       refresh_token: refreshToken,
     }),
+    signal: task.controller.signal,
   });
+  assertOwner();
   if (!response.ok) {
+    const detail = await response.text();
+    assertOwner();
     throw new Error(
-      `Codex token refresh failed: ${response.status} ${response.statusText} - ${await response.text()}`,
+      `Codex token refresh failed: ${response.status} ${response.statusText} - ${detail}`,
     );
   }
   const payload = (await response.json()) as unknown as Record<string, unknown>;
+  assertOwner();
   const token = normalizeToken(payload.access_token);
   if (!token)
     throw new Error("Codex token refresh returned empty access token");
   const nextRefreshToken =
     normalizeToken(payload.refresh_token) || refreshToken;
   const latest = await loadCodexAuthJson(dependencies);
+  assertOwner();
   const latestSession = sessionFromAuthJson(staleSession.authPath, latest);
-  // A login/logout can finish while OAuth is in flight. Never combine the
-  // old account's refreshed tokens with the new account's metadata.
+  assertSameSession(staleSession, latestSession);
   if (
-    !latest ||
     latestSession.token !== currentSession.token ||
     latestSession.refreshToken !== currentSession.refreshToken ||
     latestSession.accountId !== currentSession.accountId
@@ -328,20 +380,29 @@ async function refreshCodexAuthSessionOnce(
     if (latestSession.token) return latestSession;
     throw new Error("Codex auth changed while refreshing; please retry");
   }
-  const tokens: CodexTokenData = {
-    ...(latest.tokens || {}),
-    access_token: token,
-    refresh_token: nextRefreshToken,
-  };
   const nextAuth: CodexAuthJson = {
     ...latest,
-    tokens,
+    tokens: {
+      ...(latest?.tokens || {}),
+      access_token: token,
+      refresh_token: nextRefreshToken,
+    },
     last_refresh: new Date().toISOString(),
   };
-  await (options.writeText || defaultWriteText)(
-    staleSession.authPath,
-    `${JSON.stringify(nextAuth, null, 2)}\n`,
-  );
+  const content = `${JSON.stringify(nextAuth, null, 2)}\n`;
+  const beginCommit = () => {
+    assertOwner();
+    task.phase = "committing";
+  };
+  try {
+    if (options.writeText) {
+      beginCommit();
+      await options.writeText(staleSession.authPath, content);
+    } else await defaultWriteText(staleSession.authPath, content, beginCommit);
+  } finally {
+    task.phase = "settling";
+  }
+  assertOwner();
   return sessionFromAuthJson(staleSession.authPath, nextAuth);
 }
 
@@ -349,26 +410,107 @@ export async function refreshCodexAuthSession(
   session: CodexAuthSession,
   options: CodexAuthDependencies & { signal?: AbortSignal } = {},
 ): Promise<CodexAuthSession> {
+  assertNotAborted(options.signal);
   const key = normalizeAuthPathKey(session.authPath);
-  const existing = refreshTasksByAuthPath.get(key);
-  if (existing) return existing;
-  const { signal: _callerSignal, ...sharedOptions } = options;
-  const task = refreshCodexAuthSessionOnce(session, sharedOptions).finally(
-    () => {
-      if (refreshTasksByAuthPath.get(key) === task) {
+  let task = refreshTasksByAuthPath.get(key);
+  if (
+    task?.phase === "committing" &&
+    (task.controller.signal.aborted ||
+      !isSameCodexAuthSession(session, task.session))
+  ) {
+    throw new Error(
+      "Codex auth save is still in progress; please retry after it finishes",
+    );
+  }
+  if (!task || !isSameCodexAuthSession(session, task.session)) {
+    const previous = task;
+    const controller = new AbortController();
+    const owner: CodexRefreshTask = {
+      phase: "preparing",
+      session,
+      controller,
+      promise: Promise.resolve(session),
+    };
+    const assertOwner = () => {
+      assertNotAborted(controller.signal);
+      if (refreshTasksByAuthPath.get(key) !== owner) {
+        throw new Error("Codex auth refresh superseded; please retry");
+      }
+    };
+    if (!previous) refreshTasksByAuthPath.set(key, owner);
+    const timeout = setTimeout(() => {
+      if (
+        refreshTasksByAuthPath.get(key) === owner &&
+        owner.phase !== "committing"
+      ) {
         refreshTasksByAuthPath.delete(key);
       }
-    },
-  );
-  refreshTasksByAuthPath.set(key, task);
-  return task;
+      controller.abort(new Error("Codex auth refresh timed out; please retry"));
+    }, options.refreshTimeoutMs ?? 30_000);
+    const work = Promise.resolve()
+      .then(async () => {
+        if (previous) {
+          const currentAuth = await loadCodexAuthJson({
+            ...options,
+            authPath: session.authPath,
+          });
+          assertNotAborted(controller.signal);
+          assertSameSession(
+            session,
+            sessionFromAuthJson(session.authPath, currentAuth),
+          );
+          const active = refreshTasksByAuthPath.get(key);
+          if (
+            active?.phase === "committing" &&
+            (active.controller.signal.aborted ||
+              !isSameCodexAuthSession(session, active.session))
+          ) {
+            throw new Error(
+              "Codex auth save is still in progress; please retry after it finishes",
+            );
+          }
+          if (active && isSameCodexAuthSession(session, active.session)) {
+            return waitForCodexTask(active.promise, controller.signal);
+          }
+          refreshTasksByAuthPath.set(key, owner);
+          active?.controller.abort(
+            new Error(
+              "Codex login changed; please retry with the current login",
+            ),
+          );
+        }
+        assertOwner();
+        return refreshCodexAuthSessionOnce(
+          session,
+          options,
+          owner,
+          assertOwner,
+        );
+      })
+      .finally(() => {
+        if (refreshTasksByAuthPath.get(key) === owner)
+          refreshTasksByAuthPath.delete(key);
+      });
+    owner.promise = waitForCodexTask(work, controller.signal).finally(() =>
+      clearTimeout(timeout),
+    );
+    task = owner;
+  }
+  const result = await waitForCodexTask(task.promise, options.signal);
+  assertNotAborted(options.signal);
+  return result;
 }
 
 export async function resolveCodexAuthSession(
   options: CodexAuthDependencies & { signal?: AbortSignal } = {},
 ): Promise<CodexAuthSession> {
+  assertNotAborted(options.signal);
   const authPath = options.authPath || resolveCodexAuthPath();
-  const auth = await loadCodexAuthJson({ ...options, authPath });
+  const auth = await waitForCodexTask(
+    loadCodexAuthJson({ ...options, authPath }),
+    options.signal,
+  );
+  assertNotAborted(options.signal);
   const session = sessionFromAuthJson(authPath, auth);
   if (session.token) return session;
   if (session.refreshToken) return refreshCodexAuthSession(session, options);
@@ -378,7 +520,10 @@ export async function resolveCodexAuthSession(
 }
 
 export function resetCodexAuthRefreshStateForTests(): void {
-  refreshTasksByAuthPath.clear();
+  for (const [key, task] of refreshTasksByAuthPath) {
+    if (task.phase !== "committing") refreshTasksByAuthPath.delete(key);
+    task.controller.abort(new Error("Codex auth refresh reset"));
+  }
 }
 
 export function buildCodexAuthHeaders(
@@ -409,25 +554,47 @@ export function isTrustedCodexBackendUrl(value: string): boolean {
 export async function fetchWithCodexAuth(
   url: string,
   init: RequestInit = {},
-  options: CodexAuthDependencies & { signal?: AbortSignal } = {},
+  options: CodexAuthDependencies & {
+    signal?: AbortSignal;
+    session?: CodexAuthSession;
+  } = {},
 ): Promise<Response> {
   if (!isTrustedCodexBackendUrl(url)) {
     throw new Error("Refusing to send Codex credentials to an untrusted URL");
   }
+  const signal = options.signal || init.signal;
+  assertNotAborted(signal);
   const fetchFn = getFetch(options);
-  let session = await resolveCodexAuthSession(options);
-  const send = (current: CodexAuthSession) =>
-    fetchFn(url, {
-      ...init,
-      headers: buildCodexAuthHeaders(current, {
-        ...Object.fromEntries(new Headers(init.headers).entries()),
+  const original =
+    options.session ||
+    (await resolveCodexAuthSession({
+      ...options,
+      signal: signal || undefined,
+    }));
+  assertNotAborted(signal);
+  const send = (current: CodexAuthSession) => {
+    assertNotAborted(signal);
+    return waitForCodexTask(
+      fetchFn(url, {
+        ...init,
+        headers: buildCodexAuthHeaders(current, {
+          ...Object.fromEntries(new Headers(init.headers).entries()),
+        }),
+        signal,
       }),
-      signal: options.signal || init.signal,
+      signal,
+    );
+  };
+  let response = await send(original);
+  assertNotAborted(signal);
+  if (response.status === 401 && original.refreshToken) {
+    const session = await refreshCodexAuthSession(original, {
+      ...options,
+      signal: signal || undefined,
     });
-  let response = await send(session);
-  if (response.status === 401 && session.refreshToken) {
-    session = await refreshCodexAuthSession(session, options);
+    assertNotAborted(signal);
     response = await send(session);
+    assertNotAborted(signal);
   }
   return response;
 }

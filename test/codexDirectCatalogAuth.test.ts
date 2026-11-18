@@ -391,14 +391,24 @@ describe("Codex Direct auth and catalog", function () {
       ...options,
       signal: controller.signal,
     });
+    const cancelledOutcome = cancelledCaller.then(
+      () => {
+        throw new Error("expected cancelled caller to reject");
+      },
+      (error: unknown) => error,
+    );
     const otherCaller = refreshCodexAuthSession(session, options);
     controller.abort();
+    const error = await cancelledOutcome;
+    assert.equal((error as Error).name, "AbortError");
+    assert.isTrue(controller.signal.aborted);
     releaseRefresh?.();
 
-    const [first, second] = await Promise.all([cancelledCaller, otherCaller]);
-    assert.equal(first.token, "access-after-cancel");
+    const second = await otherCaller;
     assert.equal(second.token, "access-after-cancel");
-    assert.isUndefined(oauthSignal);
+    assert.exists(oauthSignal);
+    assert.notStrictEqual(oauthSignal, controller.signal);
+    assert.isFalse(oauthSignal!.aborted);
   });
 
   it("reuses a completed refresh when a second stale 401 arrives late", async function () {

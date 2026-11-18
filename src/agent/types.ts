@@ -1,4 +1,5 @@
 import type { ContextCachePlan } from "../contextCache/manager";
+import type { ModelCapabilityLimits } from "../modelCapabilities/types";
 import type { ZoteroTurnMetadataContext } from "../services/zoteroMetadata/types";
 import type {
   ChatMessage,
@@ -968,6 +969,8 @@ export type AgentExecutionContext = Readonly<{
 }>;
 
 export type AgentRuntimeRequestInput = AgentRequest & {
+  /** Authenticated model limits for this run, not user configuration. */
+  requestModelLimits?: ModelCapabilityLimits;
   /** Host-derived durable user goals and follow-ups for read-only task semantics;
    * never current-turn identity, permissions, or model-authored authority. */
   taskContext?: string;

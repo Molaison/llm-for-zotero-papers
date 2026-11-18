@@ -22,7 +22,10 @@ import {
   sliceTextToTokenBudget,
   type ModelInputTokenLimitSource,
 } from "../../utils/modelInputCap";
-import type { ModelProfileOverride } from "../../modelCapabilities";
+import type {
+  ModelCapabilityLimits,
+  ModelProfileOverride,
+} from "../../modelCapabilities";
 import type { OutputTokenLimitSetting } from "../../shared/types";
 import {
   resolveContextAllocation,
@@ -135,6 +138,7 @@ export function resolveAgentPromptBudgetLimits(params: {
   providerProtocol?: string;
   authMode?: string;
   profileOverride?: ModelProfileOverride;
+  requestModelLimits?: ModelCapabilityLimits;
   outputTokenLimit?: OutputTokenLimitSetting;
 }): AgentPromptBudgetLimits {
   const resolvedLimit = resolveModelInputTokenLimit(
@@ -145,6 +149,7 @@ export function resolveAgentPromptBudgetLimits(params: {
       protocol: params.providerProtocol,
       authMode: params.authMode,
       profileOverride: params.profileOverride,
+      requestModelLimits: params.requestModelLimits,
     },
   );
   // The soft limit is the shared context allocation's input budget, so a
@@ -1265,6 +1270,7 @@ export function enforceAgentPromptBudget(params: {
   providerProtocol?: string;
   authMode?: string;
   profileOverride?: ModelProfileOverride;
+  requestModelLimits?: ModelCapabilityLimits;
   outputTokenLimit?: OutputTokenLimitSetting;
   conversationKey?: number;
   resourceSignature?: string;
@@ -1276,6 +1282,7 @@ export function enforceAgentPromptBudget(params: {
     providerProtocol: params.providerProtocol,
     authMode: params.authMode,
     profileOverride: params.profileOverride,
+    requestModelLimits: params.requestModelLimits,
     outputTokenLimit: params.outputTokenLimit,
   });
   let messages = params.messages.map((message) => cloneMessage(message));

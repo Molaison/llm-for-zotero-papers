@@ -14,7 +14,10 @@ import {
   loadCodexDirectCatalog,
   resetCodexDirectCatalogForTests,
 } from "../src/codexAuth/modelCatalog";
-import { CODEX_DIRECT_RESPONSES_URL } from "../src/codexAuth/auth";
+import {
+  CODEX_DIRECT_RESPONSES_URL,
+  resolveCodexAuthPath,
+} from "../src/codexAuth/auth";
 import { PAPER_CITATION_CONTRACT } from "../src/shared/instructionContracts";
 import { ModelStreamInterruptedError } from "../src/agent/model/completion";
 import { classifyModelFailure } from "../src/agent/loop/turnBoundary";
@@ -47,14 +50,20 @@ describe("CodexResponsesAgentAdapter", function () {
     ).ztoolkit = originalToolkit;
   });
 
-  async function loadDirectCatalog(): Promise<void> {
-    await loadCodexDirectCatalog({
+  async function loadDirectCatalog(
+    session = {
       authPath: "/test/codex/auth.json",
+      accessToken: "catalog-token",
+      refreshToken: "catalog-refresh",
+    },
+  ): Promise<void> {
+    await loadCodexDirectCatalog({
+      authPath: session.authPath,
       readText: async () =>
         JSON.stringify({
           tokens: {
-            access_token: "catalog-token",
-            refresh_token: "catalog-refresh",
+            access_token: session.accessToken,
+            refresh_token: session.refreshToken,
           },
         }),
       fetchFn: (async () =>
@@ -582,7 +591,11 @@ describe("CodexResponsesAgentAdapter", function () {
   });
 
   it("omits stale direct efforts", async function () {
-    await loadDirectCatalog();
+    await loadDirectCatalog({
+      authPath: resolveCodexAuthPath(),
+      accessToken: "direct-token",
+      refreshToken: "direct-refresh",
+    });
     for (const effort of ["stale-effort"]) {
       const freshAdapter = new CodexResponsesAgentAdapter();
       let capturedBody: Record<string, unknown> = {};

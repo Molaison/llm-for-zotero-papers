@@ -771,6 +771,7 @@ export class AgentRuntime {
       const { contextWindow } = resolveAgentPromptBudgetLimits({
         model: request.model,
         inputTokenCap: request.advanced?.inputTokenCap,
+        requestModelLimits: request.requestModelLimits,
         apiBase: request.apiBase,
         providerProtocol: request.providerProtocol,
         authMode: request.authMode,
@@ -1088,6 +1089,15 @@ export class AgentRuntime {
           : null;
       webSourceRunId = runId;
       const adapter = this.adapterFactory(request);
+      const preparation = adapter.prepareRequest
+        ? await adapter.prepareRequest({ request, signal: params.signal })
+        : undefined;
+      if (preparation)
+        request.requestModelLimits = preparation.requestModelLimits;
+      const runPreparedStep = preparation
+        ? preparation.runStep
+        : (stepParams: Parameters<AgentModelAdapter["runStep"]>[0]) =>
+            adapter.runStep(stepParams);
       const adapterCapabilities = adapter.getCapabilities(request);
       const eventStreamRedactor = new AgentEventLocalDocumentStreamRedactor(
         request.conversationKey,
@@ -1246,8 +1256,8 @@ export class AgentRuntime {
         },
       });
       runEvents = writer;
-      const emit = async (event: AgentEvent) => {
-        if (!writeAllowed()) return;
+      const emit = async (event: AgentEvent, callbackAllowed = () => true) => {
+        if (!writeAllowed() || !callbackAllowed()) return;
         // Collected before redaction: the collector keeps only quote and
         // passage text, and the citations it publishes are redacted with the
         // final event that carries them.  Citation bookkeeping never decides
@@ -1267,6 +1277,7 @@ export class AgentRuntime {
           }
         }
         for (const redactedEvent of eventStreamRedactor.process(event)) {
+          if (!writeAllowed() || !callbackAllowed()) return;
           eventSeq += 1;
           writer.enqueue({
             seq: eventSeq,
@@ -1277,7 +1288,8 @@ export class AgentRuntime {
           // reaches the panel first and is written with its batch.
           if (FLUSH_BEFORE_DELIVERY.has(redactedEvent.type))
             await writer.flush();
-          if (writeAllowed()) await params.onEvent?.(redactedEvent);
+          if (writeAllowed() && callbackAllowed())
+            await params.onEvent?.(redactedEvent);
         }
       };
       emitRunEvent = emit;
@@ -1628,6 +1640,7 @@ export class AgentRuntime {
           messages: transcriptMessagesForPrompt,
           model: request.model,
           inputTokenCap: request.advanced?.inputTokenCap,
+          requestModelLimits: request.requestModelLimits,
           apiBase: request.apiBase,
           providerProtocol: request.providerProtocol,
           authMode: request.authMode,
@@ -1840,6 +1853,7 @@ export class AgentRuntime {
         messages,
         model: request.model,
         inputTokenCap: request.advanced?.inputTokenCap,
+        requestModelLimits: request.requestModelLimits,
         apiBase: request.apiBase,
         providerProtocol: request.providerProtocol,
         authMode: request.authMode,
@@ -1849,6 +1863,7 @@ export class AgentRuntime {
       const providerReplaySoftLimit = resolveAgentPromptBudgetLimits({
         model: request.model,
         inputTokenCap: request.advanced?.inputTokenCap,
+        requestModelLimits: request.requestModelLimits,
         apiBase: request.apiBase,
         providerProtocol: request.providerProtocol,
         authMode: request.authMode,
@@ -2579,17 +2594,23 @@ export class AgentRuntime {
           type: "status",
           text: statusText,
         });
+        let modelCallbacksActive = true;
+        const modelCallbackAllowed = () =>
+          modelCallbacksActive && !params.signal?.aborted;
         let stepStreamedText = "";
         let stepPendingDelta = "";
         const flushStepDelta = async () => {
-          if (!stepPendingDelta) return;
+          if (!stepPendingDelta || !modelCallbackAllowed()) return;
           const text = stepPendingDelta;
           stepPendingDelta = "";
           currentAnswerText += text;
-          await emit({
-            type: "message_delta",
-            text,
-          });
+          await emit(
+            {
+              type: "message_delta",
+              text,
+            },
+            modelCallbackAllowed,
+          );
         };
         const settleStepStreamedText = async (): Promise<string> => {
           await flushStepDelta();
@@ -2621,6 +2642,7 @@ export class AgentRuntime {
           tools: stepToolSpecs,
           model: request.model,
           inputTokenCap: request.advanced?.inputTokenCap,
+          requestModelLimits: request.requestModelLimits,
           apiBase: request.apiBase,
           providerProtocol: request.providerProtocol,
           authMode: request.authMode,
@@ -2735,7 +2757,7 @@ export class AgentRuntime {
         // turn's safety limit; and whether it reached a tool call.
         let attemptInputTokens = 0;
         let toolCallSeen = false;
-        const attemptRequest = adapter.runStep({
+        const attemptRequest = runPreparedStep({
           request,
           messages: modelInput.messages,
           continuationMessages: modelInput.continuationMessages,
@@ -2745,7 +2767,7 @@ export class AgentRuntime {
             : {}),
           signal: params.signal,
           onTextDelta: async (delta) => {
-            if (!delta) return;
+            if (!modelCallbackAllowed() || !delta) return;
             stepStreamedText += delta;
             stepPendingDelta += delta;
             if (shouldFlushStreamBuffer(stepPendingDelta)) {
@@ -2753,17 +2775,25 @@ export class AgentRuntime {
             }
           },
           onReasoning: async (reasoning) => {
-            if (!reasoning.summary && !reasoning.details) return;
-            await emit({
-              type: "reasoning",
-              round,
-              stepId: reasoning.stepId,
-              stepLabel: reasoning.stepLabel,
-              summary: reasoning.summary,
-              details: reasoning.details,
-            });
+            if (
+              !modelCallbackAllowed() ||
+              (!reasoning.summary && !reasoning.details)
+            )
+              return;
+            await emit(
+              {
+                type: "reasoning",
+                round,
+                stepId: reasoning.stepId,
+                stepLabel: reasoning.stepLabel,
+                summary: reasoning.summary,
+                details: reasoning.details,
+              },
+              modelCallbackAllowed,
+            );
           },
           onUsage: async (usage) => {
+            if (!modelCallbackAllowed()) return;
             // One agent round is one provider request: its counters are
             // cumulative within the round, and each round is billed on top of
             // the previous one.
@@ -2852,32 +2882,35 @@ export class AgentRuntime {
             ) {
               return;
             }
-            await emit({
-              type: "usage",
-              round,
-              promptTokens,
-              completionTokens,
-              totalTokens,
-              ...(typeof contextTokens === "number" ? { contextTokens } : {}),
-              ...(typeof contextWindow === "number" ? { contextWindow } : {}),
-              ...(contextWindowIsAuthoritative
-                ? { contextWindowIsAuthoritative: true }
-                : {}),
-              ...(typeof percentage === "number" ? { percentage } : {}),
-              ...(sessionId ? { sessionId } : {}),
-              ...(model ? { model } : {}),
-              ...(typeof cacheReadTokens === "number"
-                ? { cacheReadTokens }
-                : {}),
-              ...(typeof cacheWriteTokens === "number"
-                ? { cacheWriteTokens }
-                : {}),
-              ...(typeof cacheMissTokens === "number"
-                ? { cacheMissTokens }
-                : {}),
-              ...(typeof cacheHitRatio === "number" ? { cacheHitRatio } : {}),
-              ...(cacheProvider ? { cacheProvider } : {}),
-            });
+            await emit(
+              {
+                type: "usage",
+                round,
+                promptTokens,
+                completionTokens,
+                totalTokens,
+                ...(typeof contextTokens === "number" ? { contextTokens } : {}),
+                ...(typeof contextWindow === "number" ? { contextWindow } : {}),
+                ...(contextWindowIsAuthoritative
+                  ? { contextWindowIsAuthoritative: true }
+                  : {}),
+                ...(typeof percentage === "number" ? { percentage } : {}),
+                ...(sessionId ? { sessionId } : {}),
+                ...(model ? { model } : {}),
+                ...(typeof cacheReadTokens === "number"
+                  ? { cacheReadTokens }
+                  : {}),
+                ...(typeof cacheWriteTokens === "number"
+                  ? { cacheWriteTokens }
+                  : {}),
+                ...(typeof cacheMissTokens === "number"
+                  ? { cacheMissTokens }
+                  : {}),
+                ...(typeof cacheHitRatio === "number" ? { cacheHitRatio } : {}),
+                ...(cacheProvider ? { cacheProvider } : {}),
+              },
+              modelCallbackAllowed,
+            );
           },
           onToolCall: async (call) => {
             // Native adapters run tools only after a step completes; an
@@ -2927,20 +2960,28 @@ export class AgentRuntime {
             return buildAdapterToolCallResult(outcome);
           },
         });
-        const step = await attemptRequest
-          .catch(async (error: unknown) => {
-            // What the attempt streamed is on screen; the caller rolls it
-            // back before a retry.
-            await flushStepDelta();
-            throw new ModelAttemptFailed(error, stepStreamedText, toolCallSeen);
-          })
-          .finally(() => turnBoundary.recordModelCall(attemptInputTokens));
-        continuationSession.commitProviderResponse();
-        await flushStepDelta();
-        return {
-          step,
-          stepStreamedText,
-        };
+        try {
+          const step = await attemptRequest
+            .catch(async (error: unknown) => {
+              // What the attempt streamed is on screen; the caller rolls it
+              // back before a retry.
+              await flushStepDelta();
+              throw new ModelAttemptFailed(
+                error,
+                stepStreamedText,
+                toolCallSeen,
+              );
+            })
+            .finally(() => turnBoundary.recordModelCall(attemptInputTokens));
+          continuationSession.commitProviderResponse();
+          await flushStepDelta();
+          return {
+            step,
+            stepStreamedText,
+          };
+        } finally {
+          modelCallbacksActive = false;
+        }
       };
       /**
        * The round's model step under the turn's one retry policy

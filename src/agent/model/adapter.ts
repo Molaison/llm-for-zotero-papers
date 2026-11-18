@@ -1,4 +1,5 @@
 import type { ReasoningEvent, UsageStats } from "../../utils/llmClient";
+import type { ModelCapabilityLimits } from "../../modelCapabilities/types";
 import type {
   AgentModelCapabilities,
   AgentToolCall,
@@ -37,9 +38,18 @@ export type AgentStepParams = {
   onToolCall?: (call: AgentToolCall) => Promise<AgentAdapterToolCallResult>;
 };
 
+export type AgentModelPreparation = {
+  requestModelLimits?: ModelCapabilityLimits;
+  runStep: (params: AgentStepParams) => Promise<AgentModelStep>;
+};
+
 export interface AgentModelAdapter {
   getCapabilities(request: AgentRuntimeRequest): AgentModelCapabilities;
   supportsTools(request: AgentRuntimeRequest): boolean;
+  prepareRequest?(params: {
+    request: AgentRuntimeRequest;
+    signal?: AbortSignal;
+  }): Promise<AgentModelPreparation>;
   resetState?(): void;
   runStep(params: AgentStepParams): Promise<AgentModelStep>;
 }

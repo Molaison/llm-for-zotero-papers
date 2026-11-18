@@ -1,3 +1,4 @@
+import { RequestExecution } from "./requestExecution";
 /**
  * LLM API Client
  *
@@ -154,6 +155,7 @@ import {
   isReservedRequestKey,
   profileOverrideAppliesTo,
   type ModelProfileOverride,
+  type ModelCapabilityLimits,
   flattenToDotPaths,
   toReasoningProvider,
   type ResolvedModelCapabilities,
@@ -164,10 +166,7 @@ import {
   refreshCodexAuthSession,
   resolveCodexAuthSession,
 } from "../codexAuth/auth";
-import {
-  assertCodexDirectModelAvailable,
-  sanitizeCodexDirectReasoningConfig,
-} from "../codexAuth/modelCatalog";
+import { captureCodexDirectRequestCatalog } from "../codexAuth/modelCatalog";
 import {
   AUTO_REQUIRED_OUTPUT_TOKEN_SEED,
   INPUT_ESTIMATE_SAFETY_RATIO,
@@ -1596,7 +1595,10 @@ function stripUnsupportedImageContent(
   });
 }
 
-export function prepareChatRequest(params: ChatParams): PreparedChatRequest {
+export function prepareChatRequest(
+  params: ChatParams,
+  requestModelLimits?: ModelCapabilityLimits,
+): PreparedChatRequest {
   const { apiBase, apiKey, authMode, model, systemPrompt, providerProtocol } =
     getApiConfig({
       apiBase: params.apiBase,
@@ -1651,6 +1653,7 @@ export function prepareChatRequest(params: ChatParams): PreparedChatRequest {
       apiBase,
       protocol: providerProtocol,
       authMode,
+      requestModelLimits,
       profileOverride: params.profileOverride,
     },
   );
@@ -3618,6 +3621,7 @@ function createChatPayloadBuilder(params: {
   responseFileIds?: string[];
   responseFilePartsByMessage?: ReadonlyMap<number, ResponsesPreparedFilePart[]>;
   authMode: ModelProviderAuthMode;
+  codexCatalog: ReturnType<typeof captureCodexDirectRequestCatalog> | undefined;
   apiBase: string;
   providerProtocol?: ProviderProtocol;
   effectiveTemperature: number;
@@ -3658,9 +3662,10 @@ function createChatPayloadBuilder(params: {
       ? messages
       : mergeSystemMessagesForChatPayload(messages);
     if (useResponses && isCodexAuth && responsesInput) {
-      const codexReasoningEffort = sanitizeCodexDirectReasoningConfig(
-        model,
-        reasoningOverride,
+      const codexReasoningEffort = (
+        params.codexCatalog
+          ? params.codexCatalog.sanitizeReasoning(model, reasoningOverride)
+          : reasoningOverride
       )?.effort;
       const codexInstructionsParts = [
         responsesInput.instructions || "You are a helpful assistant.",
@@ -4027,36 +4032,41 @@ async function refreshCopilotAuthState(
 
 async function postWithTemperatureFallback(params: {
   url: string;
-  auth: RequestAuthState;
+  execution: RequestExecution<{
+    auth: RequestAuthState;
+    reasoning: ReasoningSelection | undefined;
+  }>;
   payload: Record<string, unknown>;
   signal?: AbortSignal;
   headers?: Record<string, string>;
   scope: ProviderRequestScope;
   allowAutomaticRetry?: boolean;
 }) {
+  const execution = params.execution;
+  execution.assertActive();
   const policyKey = getTemperaturePolicyKey(params.url, params.payload);
   const hasTemperature = Object.prototype.hasOwnProperty.call(
     params.payload,
     "temperature",
   );
-  const send = (
-    bodyPayload: Record<string, unknown>,
-    auth: RequestAuthState,
-  ) => {
-    throwIfAborted(params.signal);
-    return sendProviderRequest({
-      url: params.url,
-      scope: params.scope,
-      fetchFn: getFetch(params.signal),
-      init: {
-        method: "POST",
-        headers:
-          params.headers ??
-          buildAuthHeaders(auth.token, auth.mode, auth.codex?.accountId),
-        body: JSON.stringify(bodyPayload),
-        signal: params.signal,
-      },
-    });
+  const send = (bodyPayload: Record<string, unknown>) => {
+    execution.assertActive();
+    const auth = execution.context.auth;
+    return execution.wait(() =>
+      sendProviderRequest({
+        url: params.url,
+        scope: params.scope,
+        fetchFn: getFetch(params.signal),
+        init: {
+          method: "POST",
+          headers:
+            params.headers ??
+            buildAuthHeaders(auth.token, auth.mode, auth.codex?.accountId),
+          body: JSON.stringify(bodyPayload),
+          signal: params.signal,
+        },
+      }),
+    );
   };
 
   let requestPayload = params.payload;
@@ -4074,23 +4084,29 @@ async function postWithTemperatureFallback(params: {
     );
   }
 
-  let authState = params.auth;
-  let res = await send(requestPayload, authState);
+  let res = await send(requestPayload);
   if (res.status === 401) {
-    if (authState.mode === "codex_auth" && authState.codex?.refreshToken) {
-      authState = await refreshCodexAuthState(authState, params.signal);
-      res = await send(requestPayload, authState);
-    } else if (
-      authState.mode === "copilot_auth" &&
-      authState.copilot?.githubToken
+    if (
+      execution.context.auth.mode === "codex_auth" &&
+      execution.context.auth.codex?.refreshToken
     ) {
-      authState = await refreshCopilotAuthState(authState, params.signal);
-      res = await send(requestPayload, authState);
+      execution.context.auth = await execution.wait(() =>
+        refreshCodexAuthState(execution.context.auth, params.signal),
+      );
+      res = await send(requestPayload);
+    } else if (
+      execution.context.auth.mode === "copilot_auth" &&
+      execution.context.auth.copilot?.githubToken
+    ) {
+      execution.context.auth = await execution.wait(() =>
+        refreshCopilotAuthState(execution.context.auth, params.signal),
+      );
+      res = await send(requestPayload);
     }
   }
   if (res.ok) return res;
 
-  const firstErr = await res.text();
+  const firstErr = await execution.wait(() => res.text());
   if (params.allowAutomaticRetry === false) {
     throw providerHttpError(res, params.url, firstErr);
   }
@@ -4102,24 +4118,31 @@ async function postWithTemperatureFallback(params: {
       params.payload,
       recoveryPolicy,
     );
-    res = await send(fallbackPayload, authState);
+    res = await send(fallbackPayload);
     if (res.status === 401) {
-      if (authState.mode === "codex_auth" && authState.codex?.refreshToken) {
-        authState = await refreshCodexAuthState(authState, params.signal);
-        res = await send(fallbackPayload, authState);
-      } else if (
-        authState.mode === "copilot_auth" &&
-        authState.copilot?.githubToken
+      if (
+        execution.context.auth.mode === "codex_auth" &&
+        execution.context.auth.codex?.refreshToken
       ) {
-        authState = await refreshCopilotAuthState(authState, params.signal);
-        res = await send(fallbackPayload, authState);
+        execution.context.auth = await execution.wait(() =>
+          refreshCodexAuthState(execution.context.auth, params.signal),
+        );
+        res = await send(fallbackPayload);
+      } else if (
+        execution.context.auth.mode === "copilot_auth" &&
+        execution.context.auth.copilot?.githubToken
+      ) {
+        execution.context.auth = await execution.wait(() =>
+          refreshCopilotAuthState(execution.context.auth, params.signal),
+        );
+        res = await send(fallbackPayload);
       }
     }
     if (res.ok) {
       temperaturePolicyCache.set(policyKey, recoveryPolicy);
       return res;
     }
-    const secondErr = await res.text();
+    const secondErr = await execution.wait(() => res.text());
     throw providerHttpError(res, params.url, secondErr);
   }
   const retryCapKey = findOutputCapKey(requestPayload);
@@ -4144,14 +4167,14 @@ async function postWithTemperatureFallback(params: {
       recovery: capRecovery,
       error: firstErr,
     });
-    res = await send(fallbackPayload, authState);
+    res = await send(fallbackPayload);
     if (res.ok) {
       if (capRecovery.scope === "endpoint") {
         outputCapRecoveryCache.set(policyKey, capRecovery);
       }
       return res;
     }
-    const secondErr = await res.text();
+    const secondErr = await execution.wait(() => res.text());
     throw providerHttpError(res, params.url, secondErr);
   }
 
@@ -4257,60 +4280,70 @@ export async function postWithReasoningFallback(params: {
   /** Raw PDF turns must fail visibly rather than silently resubmit. */
   allowAutomaticRetry?: boolean;
 }) {
-  let reasoningSelection = params.initialReasoning;
-  let retries = 0;
-  const maxRetries = 2;
-  let lastError: unknown;
-  const attemptedSelections = new Set<string>([
-    getReasoningSelectionKey(reasoningSelection),
-  ]);
+  const execution = new RequestExecution(
+    {
+      auth: { ...params.auth },
+      reasoning: params.initialReasoning,
+    },
+    params.signal,
+  );
+  return execution.run(async () => {
+    let retries = 0;
+    const maxRetries = 2;
+    let lastError: unknown;
+    const attemptedSelections = new Set<string>([
+      getReasoningSelectionKey(execution.context.reasoning),
+    ]);
 
-  while (retries <= maxRetries) {
-    const payload = params.buildPayload(reasoningSelection);
-    try {
-      return await postWithTemperatureFallback({
-        url: params.url,
-        scope: params.scope,
-        auth: params.auth,
-        payload,
-        signal: params.signal,
-        headers: params.headers,
-        allowAutomaticRetry: params.allowAutomaticRetry,
-      });
-    } catch (err) {
-      if (params.allowAutomaticRetry === false)
-        throw explainResponsesPdfRejection(err);
-      lastError = err;
-      const message = err instanceof Error ? err.message : String(err);
-      if (!isReasoningErrorMessage(message)) {
-        throw err;
+    while (retries <= maxRetries) {
+      execution.assertActive();
+      const payload = params.buildPayload(execution.context.reasoning);
+      try {
+        return await postWithTemperatureFallback({
+          url: params.url,
+          scope: params.scope,
+          execution,
+          payload,
+          signal: params.signal,
+          headers: params.headers,
+          allowAutomaticRetry: params.allowAutomaticRetry,
+        });
+      } catch (err) {
+        execution.assertActive();
+        if (params.allowAutomaticRetry === false)
+          throw explainResponsesPdfRejection(err);
+        lastError = err;
+        const message = err instanceof Error ? err.message : String(err);
+        if (!isReasoningErrorMessage(message)) {
+          throw err;
+        }
+        const recovered = (
+          params.getRecoverySelection || getReasoningRecoverySelection
+        )({
+          currentReasoning: execution.context.reasoning,
+          modelName: params.modelName,
+        });
+        if (recovered === null) {
+          throw err;
+        }
+        const nextKey = getReasoningSelectionKey(recovered);
+        if (attemptedSelections.has(nextKey)) {
+          throw err;
+        }
+        appLogger.debug("LLM: Retrying after reasoning payload rejection", {
+          model: params.modelName,
+          from: getReasoningSelectionKey(execution.context.reasoning),
+          to: nextKey,
+          error: message,
+        });
+        attemptedSelections.add(nextKey);
+        execution.context.reasoning = recovered;
+        retries += 1;
       }
-      const recovered = (
-        params.getRecoverySelection || getReasoningRecoverySelection
-      )({
-        currentReasoning: reasoningSelection,
-        modelName: params.modelName,
-      });
-      if (recovered === null) {
-        throw err;
-      }
-      const nextKey = getReasoningSelectionKey(recovered);
-      if (attemptedSelections.has(nextKey)) {
-        throw err;
-      }
-      appLogger.debug("LLM: Retrying after reasoning payload rejection", {
-        model: params.modelName,
-        from: getReasoningSelectionKey(reasoningSelection),
-        to: nextKey,
-        error: message,
-      });
-      attemptedSelections.add(nextKey);
-      reasoningSelection = recovered;
-      retries += 1;
     }
-  }
 
-  throw (lastError as Error) || new Error("Request failed after retries");
+    throw (lastError as Error) || new Error("Request failed after retries");
+  });
 }
 
 function extractResponsesOutputText(data: {
@@ -4634,6 +4667,9 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
   throwIfAborted(params.signal);
   await preflightRequestModelCapabilities(params);
   throwIfAborted(params.signal);
+  if (getApiConfig(params).authMode === "codex_auth") {
+    return callLLMStream(params, () => undefined, undefined, undefined);
+  }
   const prepared = prepareChatRequest(params);
   const {
     apiBase,
@@ -4644,9 +4680,6 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     inputCap,
     providerProtocol,
   } = prepared;
-  if (authMode === "codex_auth") {
-    assertCodexDirectModelAvailable(model);
-  }
   const outputPolicy = resolveAndLogOutputPolicy({
     setting: params.outputTokenLimit,
     model,
@@ -4684,14 +4717,18 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     });
   }
   assertCodexAppServerUsesNativeRuntime(authMode);
-  if (authMode === "codex_auth") {
-    return callLLMStream(params, () => undefined, undefined, undefined);
-  }
   const auth = await resolveRequestAuthState({
     authMode,
     apiKey,
     signal: params.signal,
   });
+  const codexCatalog =
+    auth.mode === "codex_auth"
+      ? captureCodexDirectRequestCatalog(
+          auth.codex ? { ...auth.codex, token: auth.token } : undefined,
+        )
+      : undefined;
+  codexCatalog?.assertModelAvailable(model);
   if (inputCap.capped) {
     appLogger.debug("LLM: Applied model-aware input cap", {
       model,
@@ -4740,6 +4777,7 @@ export async function callLLM(params: ChatParams): Promise<ModelTurnOutcome> {
     authMode,
   });
   const buildPayload = createChatPayloadBuilder({
+    codexCatalog,
     model,
     messages,
     useResponses,
@@ -4971,7 +5009,38 @@ export async function callLLMStream(
   throwIfAborted(params.signal);
   await preflightRequestModelCapabilities(params);
   throwIfAborted(params.signal);
-  const prepared = prepareChatRequest(params);
+  const requestConfig = getApiConfig(params);
+  const isCodexDirect = requestConfig.authMode === "codex_auth";
+  if (isCodexDirect) {
+    params = {
+      ...params,
+      apiBase: requestConfig.apiBase,
+      apiKey: requestConfig.apiKey,
+      authMode: requestConfig.authMode,
+      model: requestConfig.model,
+      providerProtocol: requestConfig.providerProtocol,
+    };
+  }
+  const directAuth = isCodexDirect
+    ? await resolveRequestAuthState({
+        authMode: requestConfig.authMode,
+        apiKey: requestConfig.apiKey,
+        signal: params.signal,
+      })
+    : undefined;
+  throwIfAborted(params.signal);
+  const codexCatalog = directAuth
+    ? captureCodexDirectRequestCatalog(
+        directAuth.codex
+          ? { ...directAuth.codex, token: directAuth.token }
+          : undefined,
+      )
+    : undefined;
+  codexCatalog?.assertModelAvailable(requestConfig.model);
+  const prepared = prepareChatRequest(
+    params,
+    codexCatalog?.getModelLimits(requestConfig.model),
+  );
   const {
     apiBase,
     apiKey,
@@ -4981,9 +5050,6 @@ export async function callLLMStream(
     inputCap,
     providerProtocol,
   } = prepared;
-  if (authMode === "codex_auth") {
-    assertCodexDirectModelAvailable(model);
-  }
   const outputPolicy = resolveAndLogOutputPolicy({
     setting: params.outputTokenLimit,
     model,
@@ -5024,11 +5090,13 @@ export async function callLLMStream(
     });
   }
   assertCodexAppServerUsesNativeRuntime(authMode);
-  const auth = await resolveRequestAuthState({
-    authMode,
-    apiKey,
-    signal: params.signal,
-  });
+  const auth =
+    directAuth ??
+    (await resolveRequestAuthState({
+      authMode,
+      apiKey,
+      signal: params.signal,
+    }));
   if (inputCap.capped) {
     appLogger.debug("LLM: Applied model-aware input cap", {
       model,
@@ -5086,6 +5154,7 @@ export async function callLLMStream(
     authMode,
   });
   const buildPayload = createChatPayloadBuilder({
+    codexCatalog,
     model,
     messages,
     useResponses,
@@ -5113,6 +5182,22 @@ export async function callLLMStream(
     buildPayload,
     signal: params.signal,
   });
+
+  if (authMode === "codex_auth") {
+    const execution = new RequestExecution(undefined, params.signal);
+    return execution.run(async () => {
+      if (!res.body) {
+        const data = (await execution.wait(() => res.json())) as Parameters<
+          typeof extractResponsesOutcome
+        >[0];
+        return extractResponsesOutcome(data);
+      }
+      return parseResponsesStream(res.body, onDelta, onReasoning, onUsage, {
+        signal: params.signal,
+        stopAtTerminal: true,
+      });
+    });
+  }
 
   // Fallback to non-streaming if body is not available
   if (!res.body) {
@@ -5465,249 +5550,268 @@ export async function parseStreamResponse(
 
 export async function parseResponsesStream(
   body: ReadableStream<Uint8Array>,
-  onDelta: (delta: string) => void,
-  onReasoning?: (event: ReasoningEvent) => void,
-  onUsage?: (usage: UsageStats) => void,
-  options: { requireCompleted?: boolean; collectRichWidgets?: boolean } = {},
+  onDelta: (delta: string) => void | Promise<void>,
+  onReasoning?: (event: ReasoningEvent) => void | Promise<void>,
+  onUsage?: (usage: UsageStats) => void | Promise<void>,
+  options: {
+    requireCompleted?: boolean;
+    collectRichWidgets?: boolean;
+    stopAtTerminal?: boolean;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<ModelTurnOutcome> {
-  const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let fullText = "";
-  let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
-  const thoughtState: ThoughtTagState = {
-    inThought: false,
-    buffer: "",
-    sawAnswerText: false,
-  };
-  let sawAnswerDelta = false;
-  let sawAnswerFinal = false;
-  let sawSummaryDelta = false;
-  let sawDetailsDelta = false;
-  let sawSummaryFinal = false;
-  let sawDetailsFinal = false;
-  let responseId: string | undefined;
-  let sawCompleted = false;
-  let sawTerminal = false;
-  let streamFailure: Error | undefined;
-  let tailCallbackFailed = false;
-  let tailCallbackError: unknown;
-  const richWidgets: CprChartWidget[] = [];
-  const receiveRichWidgets = (value: unknown): void => {
-    if (!options.collectRichWidgets) return;
-    for (const candidate of Array.isArray(value) ? value : [value]) {
-      if (richWidgets.length >= 4) break;
-      const widget = parseCprChartWidget(candidate);
-      if (
-        widget &&
-        !richWidgets.some((existing) => existing.id === widget.id)
-      ) {
-        richWidgets.push(widget);
+  const execution = new RequestExecution(undefined, options.signal);
+  return execution.run(async () => {
+    const reader = body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let fullText = "";
+    let completion: ModelTurnCompletion = COMPLETE_MODEL_TURN;
+    const thoughtState: ThoughtTagState = {
+      inThought: false,
+      buffer: "",
+      sawAnswerText: false,
+    };
+    let sawAnswerDelta = false;
+    let sawAnswerFinal = false;
+    let sawSummaryDelta = false;
+    let sawDetailsDelta = false;
+    let sawSummaryFinal = false;
+    let sawDetailsFinal = false;
+    let responseId: string | undefined;
+    let sawCompleted = false;
+    let sawTerminal = false;
+    let streamFailure: Error | undefined;
+    let tailCallbackFailed = false;
+    let tailCallbackError: unknown;
+    const richWidgets: CprChartWidget[] = [];
+    const receiveRichWidgets = (value: unknown): void => {
+      if (!options.collectRichWidgets) return;
+      for (const candidate of Array.isArray(value) ? value : [value]) {
+        if (richWidgets.length >= 4) break;
+        const widget = parseCprChartWidget(candidate);
+        if (
+          widget &&
+          !richWidgets.some((existing) => existing.id === widget.id)
+        ) {
+          richWidgets.push(widget);
+        }
       }
-    }
-  };
+    };
 
-  const normalizeReasoningText = (value: unknown): string => {
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      return value
-        .map((entry) => {
-          if (typeof entry === "string") return entry;
-          if (entry && typeof entry === "object") {
-            const row = entry as { text?: unknown; summary?: unknown };
-            return (
-              normalizeStreamText(row.text) || normalizeStreamText(row.summary)
-            );
-          }
+    const normalizeReasoningText = (value: unknown): string => {
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => {
+            if (typeof entry === "string") return entry;
+            if (entry && typeof entry === "object") {
+              const row = entry as { text?: unknown; summary?: unknown };
+              return (
+                normalizeStreamText(row.text) ||
+                normalizeStreamText(row.summary)
+              );
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (value && typeof value === "object") {
+        const row = value as { text?: unknown; summary?: unknown };
+        return (
+          normalizeStreamText(row.text) || normalizeStreamText(row.summary)
+        );
+      }
+      return "";
+    };
+
+    const extractSummary = (value: unknown): string => {
+      if (!value) return "";
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => {
+            if (typeof entry === "string") return entry;
+            if (entry && typeof entry === "object") {
+              const row = entry as { text?: unknown; summary?: unknown };
+              return (
+                normalizeStreamText(row.text) ||
+                normalizeStreamText(row.summary)
+              );
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (value && typeof value === "object") {
+        const row = value as { text?: unknown; summary?: unknown };
+        return (
+          normalizeStreamText(row.text) || normalizeStreamText(row.summary)
+        );
+      }
+      return "";
+    };
+
+    const emitReasoning = async (event: ReasoningEvent) => {
+      if (!onReasoning) return;
+      const summary =
+        typeof event.summary === "string" && event.summary.length > 0
+          ? event.summary
+          : undefined;
+      const details =
+        typeof event.details === "string" && event.details.length > 0
+          ? event.details
+          : undefined;
+      if (!summary && !details) return;
+      await execution.wait(() => onReasoning({ summary, details }));
+    };
+
+    const emitAnswer = async (
+      value: unknown,
+      mode: "delta" | "final",
+    ): Promise<void> => {
+      const text = normalizeStreamText(value);
+      if (!text) return;
+      if (mode === "delta" && sawAnswerFinal) return;
+      if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
+
+      const { answer, thought } = splitThoughtTaggedText(text, thoughtState);
+      if (thought && onReasoning) {
+        await execution.wait(() => onReasoning({ details: thought }));
+      }
+      if (!answer) return;
+
+      if (mode === "delta") {
+        sawAnswerDelta = true;
+      } else {
+        sawAnswerFinal = true;
+      }
+      fullText += answer;
+      await execution.wait(() => onDelta(answer));
+    };
+
+    const extractOutputTextFromContent = (value: unknown): string => {
+      if (!value) return "";
+      if (typeof value === "string") return value;
+      if (Array.isArray(value)) {
+        return value
+          .map((entry) => extractOutputTextFromContent(entry))
+          .filter(Boolean)
+          .join("");
+      }
+      if (value && typeof value === "object") {
+        const row = value as {
+          type?: unknown;
+          text?: unknown;
+          delta?: unknown;
+          content?: unknown;
+        };
+        const typeValue =
+          typeof row.type === "string" ? row.type.toLowerCase() : "";
+        if (typeValue === "reasoning" || typeValue === "reasoning_summary") {
           return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-    if (value && typeof value === "object") {
-      const row = value as { text?: unknown; summary?: unknown };
-      return normalizeStreamText(row.text) || normalizeStreamText(row.summary);
-    }
-    return "";
-  };
+        }
+        if (
+          typeValue === "output_text" ||
+          typeValue === "text" ||
+          typeValue === "message" ||
+          typeValue === ""
+        ) {
+          return (
+            normalizeStreamText(row.text) ||
+            normalizeStreamText(row.delta) ||
+            extractOutputTextFromContent(row.content)
+          );
+        }
+      }
+      return "";
+    };
 
-  const extractSummary = (value: unknown): string => {
-    if (!value) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      return value
-        .map((entry) => {
-          if (typeof entry === "string") return entry;
-          if (entry && typeof entry === "object") {
-            const row = entry as { text?: unknown; summary?: unknown };
-            return (
-              normalizeStreamText(row.text) || normalizeStreamText(row.summary)
-            );
-          }
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-    if (value && typeof value === "object") {
-      const row = value as { text?: unknown; summary?: unknown };
-      return normalizeStreamText(row.text) || normalizeStreamText(row.summary);
-    }
-    return "";
-  };
-
-  const emitReasoning = (event: ReasoningEvent) => {
-    if (!onReasoning) return;
-    const summary =
-      typeof event.summary === "string" && event.summary.length > 0
-        ? event.summary
-        : undefined;
-    const details =
-      typeof event.details === "string" && event.details.length > 0
-        ? event.details
-        : undefined;
-    if (!summary && !details) return;
-    onReasoning({ summary, details });
-  };
-
-  const emitAnswer = (value: unknown, mode: "delta" | "final"): void => {
-    const text = normalizeStreamText(value);
-    if (!text) return;
-    if (mode === "delta" && sawAnswerFinal) return;
-    if (mode === "final" && (sawAnswerDelta || sawAnswerFinal)) return;
-
-    const { answer, thought } = splitThoughtTaggedText(text, thoughtState);
-    if (thought && onReasoning) {
-      onReasoning({ details: thought });
-    }
-    if (!answer) return;
-
-    if (mode === "delta") {
-      sawAnswerDelta = true;
-    } else {
-      sawAnswerFinal = true;
-    }
-    fullText += answer;
-    onDelta(answer);
-  };
-
-  const extractOutputTextFromContent = (value: unknown): string => {
-    if (!value) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) {
-      return value
-        .map((entry) => extractOutputTextFromContent(entry))
-        .filter(Boolean)
-        .join("");
-    }
-    if (value && typeof value === "object") {
+    const extractOutputTextFromOutputItem = (value: unknown): string => {
+      if (!value || typeof value !== "object") return "";
       const row = value as {
         type?: unknown;
         text?: unknown;
-        delta?: unknown;
         content?: unknown;
       };
       const typeValue =
         typeof row.type === "string" ? row.type.toLowerCase() : "";
-      if (typeValue === "reasoning" || typeValue === "reasoning_summary") {
+      if (
+        typeValue &&
+        typeValue !== "message" &&
+        typeValue !== "output_text" &&
+        typeValue !== "text"
+      ) {
         return "";
       }
-      if (
-        typeValue === "output_text" ||
-        typeValue === "text" ||
-        typeValue === "message" ||
-        typeValue === ""
-      ) {
-        return (
-          normalizeStreamText(row.text) ||
-          normalizeStreamText(row.delta) ||
-          extractOutputTextFromContent(row.content)
-        );
-      }
-    }
-    return "";
-  };
-
-  const extractOutputTextFromOutputItem = (value: unknown): string => {
-    if (!value || typeof value !== "object") return "";
-    const row = value as {
-      type?: unknown;
-      text?: unknown;
-      content?: unknown;
+      return (
+        extractOutputTextFromContent(row.content) ||
+        normalizeStreamText(row.text)
+      );
     };
-    const typeValue =
-      typeof row.type === "string" ? row.type.toLowerCase() : "";
-    if (
-      typeValue &&
-      typeValue !== "message" &&
-      typeValue !== "output_text" &&
-      typeValue !== "text"
-    ) {
-      return "";
-    }
-    return (
-      extractOutputTextFromContent(row.content) || normalizeStreamText(row.text)
-    );
-  };
 
-  const extractOutputTextFromOutputs = (outputs: unknown): string => {
-    if (!Array.isArray(outputs)) return "";
-    return outputs
-      .map((entry) => extractOutputTextFromOutputItem(entry))
-      .filter(Boolean)
-      .join("");
-  };
-
-  const emitReasoningFromOutputItem = (value: unknown): void => {
-    if (!value || typeof value !== "object") return;
-    const row = value as {
-      type?: unknown;
-      summary?: unknown;
-      content?: unknown;
-      text?: unknown;
-      reasoning?: unknown;
+    const extractOutputTextFromOutputs = (outputs: unknown): string => {
+      if (!Array.isArray(outputs)) return "";
+      return outputs
+        .map((entry) => extractOutputTextFromOutputItem(entry))
+        .filter(Boolean)
+        .join("");
     };
-    const typeValue =
-      typeof row.type === "string" ? row.type.toLowerCase() : "";
-    if (typeValue !== "reasoning") return;
-    if (!sawSummaryDelta && !sawSummaryFinal) {
-      emitReasoning({ summary: extractSummary(row.summary) });
-    }
-    if (!sawDetailsDelta && !sawDetailsFinal) {
-      emitReasoning({
-        details:
-          normalizeReasoningText(row.content) ||
-          normalizeReasoningText(row.reasoning) ||
-          normalizeReasoningText(row.text),
-      });
-    }
-  };
 
-  try {
-    readStream: while (true) {
-      const { value, done } = await reader.read();
-
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      if (done && buffer) {
-        lines.push(buffer);
-        buffer = "";
+    const emitReasoningFromOutputItem = async (
+      value: unknown,
+    ): Promise<void> => {
+      if (!value || typeof value !== "object") return;
+      const row = value as {
+        type?: unknown;
+        summary?: unknown;
+        content?: unknown;
+        text?: unknown;
+        reasoning?: unknown;
+      };
+      const typeValue =
+        typeof row.type === "string" ? row.type.toLowerCase() : "";
+      if (typeValue !== "reasoning") return;
+      if (!sawSummaryDelta && !sawSummaryFinal) {
+        await emitReasoning({ summary: extractSummary(row.summary) });
       }
+      if (!sawDetailsDelta && !sawDetailsFinal) {
+        await emitReasoning({
+          details:
+            normalizeReasoningText(row.content) ||
+            normalizeReasoningText(row.reasoning) ||
+            normalizeReasoningText(row.text),
+        });
+      }
+    };
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
+    try {
+      readStream: while (true) {
+        const { value, done } = await execution.wait(() => reader.read());
 
-        const data = trimmed.slice(5).trim();
-        if (!data) continue;
-        if (data === "[DONE]") {
-          if (options.requireCompleted) break readStream;
-          continue;
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        if (done && buffer) {
+          lines.push(buffer);
+          buffer = "";
         }
 
-        try {
-          const parsed = JSON.parse(data) as {
+        for (const line of lines) {
+          execution.assertActive();
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+
+          const data = trimmed.slice(5).trim();
+          if (!data) continue;
+          if (data === "[DONE]") {
+            if (options.requireCompleted) break readStream;
+            continue;
+          }
+
+          let parsed: {
             type?: string;
             widget?: unknown;
             code?: unknown;
@@ -5746,6 +5850,14 @@ export async function parseResponsesStream(
               };
             };
           };
+          try {
+            parsed = JSON.parse(data);
+          } catch (error) {
+            if (options.requireCompleted) throw error;
+            if (!done)
+              appLogger.warn("LLM responses stream parse error:", error);
+            continue;
+          }
 
           const eventType =
             typeof parsed.type === "string" ? parsed.type.toLowerCase() : "";
@@ -5783,7 +5895,8 @@ export async function parseResponsesStream(
           }
           // Check an unterminated EOF frame for failure above, but preserve
           // legacy handling of successful EOF tails for non-strict callers.
-          if (done && !options.requireCompleted) continue;
+          if (done && !options.requireCompleted && !options.stopAtTerminal)
+            continue;
           const messageContent =
             typeof parsed.message === "object"
               ? parsed.message?.content
@@ -5795,6 +5908,21 @@ export async function parseResponsesStream(
           if (eventType === "response.rich_widget.done") {
             receiveRichWidgets(parsed.widget);
             continue;
+          }
+          if (
+            options.stopAtTerminal &&
+            (eventType === "response.completed" ||
+              eventType === "response.incomplete") &&
+            (!parsed.response ||
+              (parsed.response.status &&
+                parsed.response.status !==
+                  (eventType === "response.completed"
+                    ? "completed"
+                    : "incomplete")))
+          ) {
+            throw new Error(
+              "Responses terminal event has an invalid response status.",
+            );
           }
           if (eventType === "response.incomplete") {
             sawTerminal = true;
@@ -5812,7 +5940,7 @@ export async function parseResponsesStream(
           }
 
           if (eventType === "response.output_text.delta" && parsed.delta) {
-            emitAnswer(parsed.delta, "delta");
+            await emitAnswer(parsed.delta, "delta");
             continue;
           }
 
@@ -5829,7 +5957,7 @@ export async function parseResponsesStream(
               partType === "output_text" ||
               partType === "text"
             ) {
-              emitAnswer(
+              await emitAnswer(
                 parsed.delta ??
                   parsed.text ??
                   parsed.part?.text ??
@@ -5842,7 +5970,7 @@ export async function parseResponsesStream(
 
           if (eventType === "response.output_text.done") {
             // Some providers emit full text in `done` after streaming deltas.
-            emitAnswer(parsed.text ?? parsed.delta, "final");
+            await emitAnswer(parsed.text ?? parsed.delta, "final");
             continue;
           }
 
@@ -5856,7 +5984,7 @@ export async function parseResponsesStream(
               partType === "output_text" ||
               partType === "text"
             ) {
-              emitAnswer(
+              await emitAnswer(
                 parsed.text ??
                   parsed.delta ??
                   parsed.part?.text ??
@@ -5871,12 +5999,12 @@ export async function parseResponsesStream(
             eventType === "response.message.delta" ||
             eventType === "response.message.added"
           ) {
-            emitAnswer(messageContent, "delta");
+            await emitAnswer(messageContent, "delta");
             continue;
           }
 
           if (eventType === "response.message.done") {
-            emitAnswer(messageContent, "final");
+            await emitAnswer(messageContent, "final");
             continue;
           }
 
@@ -5886,7 +6014,7 @@ export async function parseResponsesStream(
             parsed.delta
           ) {
             sawSummaryDelta = true;
-            emitReasoning({ summary: normalizeStreamText(parsed.delta) });
+            await emitReasoning({ summary: normalizeStreamText(parsed.delta) });
             continue;
           }
 
@@ -5897,7 +6025,7 @@ export async function parseResponsesStream(
           ) {
             sawSummaryFinal = true;
             if (!sawSummaryDelta) {
-              emitReasoning({
+              await emitReasoning({
                 summary: normalizeStreamText(parsed.text ?? parsed.delta),
               });
             }
@@ -5923,7 +6051,7 @@ export async function parseResponsesStream(
               );
               if (partSummary) {
                 sawSummaryFinal = true;
-                emitReasoning({ summary: partSummary });
+                await emitReasoning({ summary: partSummary });
               }
             }
             continue;
@@ -5935,7 +6063,7 @@ export async function parseResponsesStream(
             parsed.delta
           ) {
             sawDetailsDelta = true;
-            emitReasoning({ details: normalizeStreamText(parsed.delta) });
+            await emitReasoning({ details: normalizeStreamText(parsed.delta) });
             continue;
           }
 
@@ -5946,7 +6074,7 @@ export async function parseResponsesStream(
           ) {
             sawDetailsFinal = true;
             if (!sawDetailsDelta) {
-              emitReasoning({
+              await emitReasoning({
                 details: normalizeStreamText(parsed.text ?? parsed.delta),
               });
             }
@@ -5956,7 +6084,7 @@ export async function parseResponsesStream(
           if (eventType === "response.reasoning" && parsed.reasoning) {
             sawDetailsFinal = true;
             if (!sawDetailsDelta) {
-              emitReasoning({
+              await emitReasoning({
                 details: normalizeReasoningText(parsed.reasoning),
               });
             }
@@ -5967,15 +6095,21 @@ export async function parseResponsesStream(
             eventType === "response.output_item.added" ||
             eventType === "response.output_item.delta"
           ) {
-            emitReasoningFromOutputItem(parsed.item);
-            emitAnswer(extractOutputTextFromOutputItem(parsed.item), "delta");
+            await emitReasoningFromOutputItem(parsed.item);
+            await emitAnswer(
+              extractOutputTextFromOutputItem(parsed.item),
+              "delta",
+            );
             continue;
           }
 
           if (eventType === "response.output_item.done") {
-            emitReasoningFromOutputItem(parsed.item);
-            emitAnswer(extractOutputTextFromOutputItem(parsed.item), "final");
-            emitAnswer(
+            await emitReasoningFromOutputItem(parsed.item);
+            await emitAnswer(
+              extractOutputTextFromOutputItem(parsed.item),
+              "final",
+            );
+            await emitAnswer(
               extractOutputTextFromOutputs(parsed.response?.output),
               "final",
             );
@@ -5983,12 +6117,15 @@ export async function parseResponsesStream(
               ? parsed.response.output
               : [];
             for (const out of outputs) {
-              emitReasoningFromOutputItem(out);
+              await emitReasoningFromOutputItem(out);
             }
             continue;
           }
 
-          if (eventType === "response.completed") {
+          if (
+            eventType === "response.completed" ||
+            (options.stopAtTerminal && eventType === "response.incomplete")
+          ) {
             if (
               options.requireCompleted &&
               (!parsed.response ||
@@ -6000,10 +6137,10 @@ export async function parseResponsesStream(
               );
             }
             sawTerminal = true;
-            sawCompleted = true;
+            sawCompleted = eventType === "response.completed";
             receiveRichWidgets(parsed.response?.rich_widgets);
-            completion = COMPLETE_MODEL_TURN;
-            emitAnswer(
+            if (sawCompleted) completion = COMPLETE_MODEL_TURN;
+            await emitAnswer(
               parsed.response?.output_text ??
                 extractOutputTextFromOutputs(parsed.response?.output),
               "final",
@@ -6015,14 +6152,16 @@ export async function parseResponsesStream(
                 (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
               if (total > 0) {
                 const cacheUsage = extractContextCacheUsage(u);
-                onUsage({
-                  promptTokens: u.input_tokens ?? 0,
-                  completionTokens: u.output_tokens ?? 0,
-                  totalTokens: total,
-                  ...cacheUsage,
-                  contextTokens: u.input_tokens ?? 0,
-                  contextWindowIsAuthoritative: (u.input_tokens ?? 0) > 0,
-                });
+                await execution.wait(() =>
+                  onUsage({
+                    promptTokens: u.input_tokens ?? 0,
+                    completionTokens: u.output_tokens ?? 0,
+                    totalTokens: total,
+                    ...cacheUsage,
+                    contextTokens: u.input_tokens ?? 0,
+                    contextWindowIsAuthoritative: (u.input_tokens ?? 0) > 0,
+                  }),
+                );
               }
             }
           }
@@ -6036,63 +6175,65 @@ export async function parseResponsesStream(
               ? parsed.response.output
               : [];
             for (const out of outputs) {
-              emitReasoningFromOutputItem(out);
+              await emitReasoningFromOutputItem(out);
             }
           }
-          if (options.requireCompleted && sawTerminal) break readStream;
-        } catch (err) {
-          if (options.requireCompleted || streamFailure) throw err;
-          if (!done) appLogger.warn("LLM responses stream parse error:", err);
+          if (
+            (options.requireCompleted || options.stopAtTerminal) &&
+            sawTerminal
+          )
+            break readStream;
         }
+        if (done) break;
       }
-      if (done) break;
-    }
-    if (options.requireCompleted && !sawCompleted) {
-      throw new Error(
-        "Responses connection ended before response.completed; no automatic retry was attempted.",
-      );
-    }
-  } finally {
-    try {
-      const tail = resolveUnterminatedThought(thoughtState);
-      if (tail.text) {
-        if (tail.asAnswer) {
-          fullText += tail.text;
-          onDelta(tail.text);
-        } else if (onReasoning) {
-          onReasoning({ details: tail.text });
-        }
+      if (options.requireCompleted && !sawCompleted) {
+        throw new Error(
+          "Responses connection ended before response.completed; no automatic retry was attempted.",
+        );
       }
     } catch (error) {
-      tailCallbackFailed = true;
-      tailCallbackError = error;
-      // A consumer callback must not replace an explicit provider failure.
-      if (streamFailure) {
-        appLogger.warn("LLM responses stream tail callback error:", error);
-      }
+      if (!streamFailure) execution.fail(error);
+      throw error;
     } finally {
       try {
-        if (options.requireCompleted || streamFailure || tailCallbackFailed) {
-          void reader.cancel().catch(() => {});
+        const tail = resolveUnterminatedThought(thoughtState);
+        if (tail.text && execution.isActive()) {
+          if (tail.asAnswer) {
+            fullText += tail.text;
+            await execution.wait(() => onDelta(tail.text));
+          } else if (onReasoning) {
+            await execution.wait(() => onReasoning({ details: tail.text }));
+          }
+        }
+      } catch (error) {
+        tailCallbackFailed = true;
+        tailCallbackError = error;
+        // A consumer callback must not replace an explicit provider failure.
+        if (streamFailure) {
+          appLogger.warn("LLM responses stream tail callback error:", error);
         }
       } finally {
-        reader.releaseLock();
+        try {
+          void reader.cancel().catch(() => {});
+        } finally {
+          reader.releaseLock();
+        }
       }
     }
-  }
 
-  // Propagate a genuine callback failure only after reader cleanup. A main
-  // error already in flight (including streamFailure) takes precedence.
-  if (tailCallbackFailed) throw tailCallbackError;
+    // Propagate a genuine callback failure only after reader cleanup. A main
+    // error already in flight (including streamFailure) takes precedence.
+    if (tailCallbackFailed) throw tailCallbackError;
 
-  return {
-    ...modelTurnOutcome(
-      fullText,
-      completion,
-      completion.status === "incomplete" && responseId
-        ? { responseId }
-        : undefined,
-    ),
-    ...(sawCompleted && richWidgets.length ? { richWidgets } : {}),
-  };
+    return {
+      ...modelTurnOutcome(
+        fullText,
+        completion,
+        completion.status === "incomplete" && responseId
+          ? { responseId }
+          : undefined,
+      ),
+      ...(sawCompleted && richWidgets.length ? { richWidgets } : {}),
+    };
+  });
 }

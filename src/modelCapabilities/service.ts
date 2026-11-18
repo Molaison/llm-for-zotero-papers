@@ -460,6 +460,7 @@ function getLiveModel(
 function mergeLimits(
   entry: RegistryModelEntry | null,
   live: DiscoveredModel | undefined,
+  requestModelLimits?: ModelCapabilityLimits,
 ): { limits: ModelCapabilityLimits; source?: CapabilitySource } {
   const entryLimits = entry?.limits;
   const liveLimits = live?.limits;
@@ -472,11 +473,19 @@ function mergeLimits(
     // rules when the provider does not expose a separate input limit.
     limits.inputTokens = liveLimits.contextWindowTokens;
   }
-  const source: CapabilitySource | undefined = liveLimits
-    ? "live"
-    : entryLimits
-      ? activeRegistrySource
-      : undefined;
+  Object.assign(limits, requestModelLimits);
+  if (
+    requestModelLimits?.contextWindowTokens &&
+    requestModelLimits.inputTokens === undefined
+  ) {
+    limits.inputTokens = requestModelLimits.contextWindowTokens;
+  }
+  const source: CapabilitySource | undefined =
+    requestModelLimits || liveLimits
+      ? "live"
+      : entryLimits
+        ? activeRegistrySource
+        : undefined;
   return { limits, source };
 }
 
@@ -702,7 +711,7 @@ export function getModelCapabilities(
   const model = identity.model.trim();
   const entry = findRegistryEntry(activeRegistry, provider, model);
   const live = getLiveModel(identity);
-  const mergedLimits = mergeLimits(entry, live);
+  const mergedLimits = mergeLimits(entry, live, identity.requestModelLimits);
   const mergedReasoning = mergeReasoning(
     provider,
     model,

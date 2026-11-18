@@ -22129,7 +22129,9 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   color: var(--fill-primary);
   font-family: inherit;
   font-size: var(--llm-fs-12);
-  line-height: 1.5;
+  line-height: 1.45;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
   z-index: 1000;
 }
 .llm-annotation-popover[hidden] {
@@ -22139,33 +22141,95 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding-block-end: 8px;
 }
 .llm-annotation-popover button {
+  box-sizing: border-box;
+  min-height: 30px;
+  max-width: 100%;
+  height: auto;
   font: inherit;
   color: inherit;
   background: var(--llm-action-surface-bg);
   border: var(--llm-action-surface-border);
   border-radius: 6px;
   padding: 5px 8px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  letter-spacing: 0;
   cursor: pointer;
+}
+.llm-annotation-popover button:hover:not(:disabled) {
+  background: var(--llm-action-surface-bg-strong);
+}
+.llm-annotation-popover button:active:not(:disabled) {
+  border-color: var(--fill-primary);
+}
+.llm-annotation-popover button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.llm-annotation-popover :is(button, input, summary):focus-visible,
+.llm-annotation-record:focus,
+.llm-annotation-answers .llm-annotation-state:focus-visible,
+.llm-annotation-raw > summary:focus-visible {
+  outline: 2px solid var(--color-accent, var(--fill-primary));
+  outline-offset: 2px;
 }
 .llm-annotation-popover summary {
   cursor: pointer;
+  padding-block: 6px;
+  font-weight: 600;
+}
+.llm-annotation-popover summary:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .llm-annotation-row,
 .llm-annotation-answers .llm-annotation-answer {
   border-bottom: 1px solid var(--stroke-secondary);
   padding-block: 8px;
 }
+.llm-annotation-row:last-child,
+.llm-annotation-answers .llm-annotation-answer:last-of-type {
+  border-bottom: 0;
+}
 .llm-annotation-row label {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+.llm-annotation-row label > input {
+  flex: 0 0 auto;
+  margin: 0.2em 0 0;
+  accent-color: var(--color-accent, auto);
+}
+.llm-annotation-row label > span {
+  min-width: 0;
+}
+.llm-annotation-row input:checked + span {
+  font-weight: 600;
+}
+.llm-annotation-row label > input:disabled {
+  cursor: default;
 }
 .llm-annotation-row p,
 .llm-annotation-row blockquote,
 .llm-annotation-answers p {
   margin: 6px 0;
+}
+.llm-annotation-row blockquote {
+  padding: 0;
+  border: 0;
+  font-size: var(--llm-fs-11);
+}
+.llm-annotation-row > .llm-annotation-source,
+.llm-annotation-row > blockquote {
+  margin-block-start: 4px;
+}
+.llm-annotation-question {
+  font-weight: 600;
 }
 .llm-annotation-popover img {
   display: block;
@@ -22187,14 +22251,34 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 }
 
 .llm-annotation-content {
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  padding: 2px;
+  scrollbar-gutter: stable;
 }
 .llm-annotation-tools,
 #llm-annotation-status,
 #llm-annotation-chosen {
   flex-shrink: 0;
+}
+#llm-annotation-status {
+  margin: 0 0 6px;
+}
+#llm-annotation-status:empty {
+  display: none;
+}
+#llm-annotation-chosen {
+  margin: 0;
+  padding-block-end: 8px;
+  border-bottom: 1px solid var(--stroke-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.llm-annotation-preview,
+.llm-annotation-history {
+  margin-block-start: 8px;
+  border-top: 1px solid var(--stroke-secondary);
 }
 .llm-annotation-record {
   border-top: 1px solid var(--stroke-secondary);
@@ -22206,6 +22290,28 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   flex-wrap: wrap;
   gap: 6px;
 }
+.llm-annotation-record-heading > p {
+  flex-basis: 100%;
+  margin: 0;
+  font-weight: 600;
+}
+.llm-annotation-answer-controls {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-block-start: 8px;
+}
+.llm-annotation-answer-controls > .llm-annotation-state {
+  margin: 0;
+}
+.llm-annotation-answer-controls > .llm-annotation-raw {
+  min-width: 0;
+  max-width: 100%;
+}
+.llm-annotation-raw[open] {
+  flex-basis: 100%;
+}
 .llm-annotation-source,
 .llm-annotation-popover .llm-annotation-source {
   appearance: none;
@@ -22214,6 +22320,7 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   background: none;
   border: 0;
   border-radius: 0;
+  min-height: 0;
   padding: 0;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -22221,6 +22328,10 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   white-space: normal;
   overflow-wrap: anywhere;
   cursor: pointer;
+}
+.llm-annotation-popover .llm-annotation-source:hover:not(:disabled) {
+  background: none;
+  text-decoration-thickness: 2px;
 }
 .llm-annotation-source:focus-visible {
   outline: 2px solid var(--fill-primary);

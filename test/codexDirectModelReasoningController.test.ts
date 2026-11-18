@@ -10,7 +10,10 @@ import {
   loadCodexDirectCatalog,
   resetCodexDirectCatalogForTests,
 } from "../src/codexAuth/modelCatalog";
-import { setCodexDirectReasoningSelection } from "../src/codexAuth/reasoningPrefs";
+import {
+  getCodexDirectReasoningSelection,
+  setCodexDirectReasoningSelection,
+} from "../src/codexAuth/reasoningPrefs";
 
 describe("Codex Direct panel model/reasoning controller", function () {
   const globals = globalThis as typeof globalThis & { Zotero?: typeof Zotero };
@@ -98,7 +101,7 @@ describe("Codex Direct panel model/reasoning controller", function () {
     controller.dispose();
   });
 
-  it("rejects an unavailable saved model before send", function () {
+  it("preserves saved model reasoning intent for authenticated send validation", function () {
     setModelProviderGroups([
       {
         id: "direct",
@@ -110,16 +113,21 @@ describe("Codex Direct panel model/reasoning controller", function () {
       },
     ]);
     setLastUsedModelEntryId("missing-row");
+    setCodexDirectReasoningSelection("missing-model", "high");
     const controller = createCodexDirectModelReasoningController({
       getSelectedEntry: () => getModelEntryById("missing-row"),
       isRuntimeConversationSystem: () => false,
       onStateChange: () => undefined,
     });
 
-    assert.throws(
-      () => controller.getSendReasoning(),
-      "saved Codex Direct model is unavailable",
+    assert.equal(controller.resolveReasoningSelection().mode, "auto");
+    assert.equal(getCodexDirectReasoningSelection("missing-model"), "high");
+    assert.equal(controller.getSendReasoning()?.effort, "high");
+    assert.equal(
+      controller.getRetryReasoning(getModelEntryById("missing-row")!)?.effort,
+      "high",
     );
+    assert.equal(getCodexDirectReasoningSelection("missing-model"), "high");
     controller.dispose();
   });
 
