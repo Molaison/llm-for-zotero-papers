@@ -6041,7 +6041,7 @@ export function installWorkflowTestHarness(targetAddon: {
     observeCitationNavigationFocus: async (button, options) => {
       assertWorkflowTestEnabled();
       const getMainWindow = Zotero.getMainWindow;
-      const mainWindow = getMainWindow();
+      const mainWindow = Zotero.getMainWindow();
       const originalDebug = appLogger.debug;
       const diagnostics: string[] = [];
       const getFullText = Zotero.PDFWorker.getFullText;

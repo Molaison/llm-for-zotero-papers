@@ -1,3 +1,121 @@
+/* Beautiful UI foundation and Drive loader, adapted from MIT-licensed
+   app/globals.css and components/primitives/LoadingState.tsx at
+   https://github.com/slev12397/beautiful-ui/tree/44a274e598395ab61e7c96c26fda2758780253b7
+   See vendor/beautiful-ui/LICENSE.txt. */
+
+:where(.llm-panel, #llmforzotero-standalone-chat-root) {
+  --bui-radius-chip: 6px;
+  --bui-radius-control: 8px;
+  --bui-radius-window: 14px;
+}
+
+:where(
+  .llm-panel:not(#llmforzotero-standalone-chat-root *),
+  #llmforzotero-standalone-chat-root
+) {
+  --bui-canvas: oklch(0.961 0.002 247.84);
+  --bui-surface: oklch(1 0 0);
+  --bui-hover: oklch(0.97 0.002 247.839);
+  --bui-field: oklch(0.961 0.001 286.375);
+  --bui-ink: oklch(0.247 0.006 258.361);
+  --bui-ink-2: oklch(0.506 0.01 264.477);
+  --bui-line: oklch(0.946 0.003 264.542);
+  --bui-line-strong: oklch(0.912 0.005 258.326);
+  --bui-accent-ink: oklch(0.556 0.187 255.617);
+  --bui-accent-tint: oklch(0.96 0.019 252.878);
+  --bui-shadow-card:
+    0 1px 2px rgb(16 24 40 / 0.07), 0 3px 8px rgb(16 24 40 / 0.05);
+  --bui-shadow-overlay:
+    0 2px 6px rgb(16 24 40 / 0.09), 0 8px 20px rgb(16 24 40 / 0.12);
+}
+
+/* A standalone window's theme override takes precedence over the host. */
+:where(.window-is-dark, :root[lwtheme-brighttext])
+  .llm-panel:not(#llmforzotero-standalone-chat-root *),
+#llmforzotero-standalone-chat-root[data-standalone-theme="dark"] {
+  --bui-canvas: oklch(0.231 0.004 264.487);
+  --bui-surface: oklch(0.26 0.006 271.191);
+  --bui-hover: oklch(0.289 0.006 271.22);
+  --bui-field: oklch(0.293 0.006 271.223);
+  --bui-ink: oklch(0.964 0.002 247.839);
+  --bui-ink-2: oklch(0.731 0.008 260.731);
+  --bui-line: oklch(0.308 0.006 258.354);
+  --bui-line-strong: oklch(0.356 0.007 264.474);
+  --bui-accent-ink: oklch(0.788 0.113 248.33);
+  --bui-accent-tint: oklch(0.68 0.173 253.301 / 0.16);
+  --bui-shadow-card: 0 1px 2px rgb(0 0 0 / 0.2), 0 2px 6px rgb(0 0 0 / 0.2);
+  --bui-shadow-overlay: 0 8px 28px rgb(0 0 0 / 0.34);
+}
+
+@media (prefers-color-scheme: dark) {
+  .llm-panel:not(#llmforzotero-standalone-chat-root *),
+  #llmforzotero-standalone-chat-root:not([data-standalone-theme="light"]) {
+    --bui-canvas: oklch(0.231 0.004 264.487);
+    --bui-surface: oklch(0.26 0.006 271.191);
+    --bui-hover: oklch(0.289 0.006 271.22);
+    --bui-field: oklch(0.293 0.006 271.223);
+    --bui-ink: oklch(0.964 0.002 247.839);
+    --bui-ink-2: oklch(0.731 0.008 260.731);
+    --bui-line: oklch(0.308 0.006 258.354);
+    --bui-line-strong: oklch(0.356 0.007 264.474);
+    --bui-accent-ink: oklch(0.788 0.113 248.33);
+    --bui-accent-tint: oklch(0.68 0.173 253.301 / 0.16);
+    --bui-shadow-card: 0 1px 2px rgb(0 0 0 / 0.2), 0 2px 6px rgb(0 0 0 / 0.2);
+    --bui-shadow-overlay: 0 8px 28px rgb(0 0 0 / 0.34);
+  }
+}
+
+.llm-bui-drive {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(3, 4px);
+  gap: 1.5px;
+}
+
+.llm-bui-drive-pixel {
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.15;
+  animation: llm-bui-pixel-on 650ms ease-in-out infinite;
+  animation-delay: calc(
+    var(--llm-stable-animation-delay, 0ms) + var(--llm-bui-pixel-delay, 0ms)
+  );
+}
+
+/* The columns of the Drive chevron advance in 90 ms steps. */
+.llm-bui-drive-pixel:is(:nth-child(1), :nth-child(5), :nth-child(7)) {
+  --llm-bui-pixel-delay: 90ms;
+}
+
+.llm-bui-drive-pixel:is(:nth-child(2), :nth-child(6), :nth-child(8)) {
+  --llm-bui-pixel-delay: 180ms;
+}
+
+.llm-bui-drive-pixel:is(:nth-child(3), :nth-child(9)) {
+  --llm-bui-pixel-delay: 270ms;
+}
+
+@keyframes llm-bui-pixel-on {
+  0%,
+  100% {
+    opacity: 0.15;
+    transform: scale(0.92);
+  }
+  45% {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .llm-bui-drive-pixel {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+
 /* LLM Panel Styles */
 
 /* Radix Colors, revision dbdb85470547c7d34b9001f48fddb08ded335979.
@@ -3108,9 +3226,10 @@
   align-items: center;
   gap: 4px;
   padding: 0;
-  border-radius: 8px;
-  background: transparent;
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-canvas);
   border: none;
+  box-shadow: inset 0 0 0 1px var(--bui-line);
   min-width: 0;
   max-width: 100%;
 }
@@ -3126,9 +3245,9 @@
   white-space: nowrap;
   box-sizing: border-box;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--bui-radius-chip);
   background: none;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   font-weight: 500;
   cursor: pointer;
@@ -3137,14 +3256,14 @@
 }
 
 .llm-standalone-tab:hover {
-  color: var(--llm-slate11);
+  color: var(--bui-ink);
 }
 
 .llm-standalone-tab.active {
-  background: var(--llm-slate3);
-  color: var(--llm-slate12);
+  background: var(--bui-surface);
+  color: var(--bui-ink);
   font-weight: 600;
-  box-shadow: none;
+  box-shadow: var(--bui-shadow-card);
 }
 
 /* Light surfaces for the segmented tabs, shared by the standalone window and
@@ -4773,9 +4892,9 @@
 }
 
 .llm-bubble.user {
-  background: var(--llm-slate3);
-  color: var(--llm-slate12);
-  border-radius: 16px;
+  background: color-mix(in srgb, var(--bui-field) 94%, var(--bui-ink));
+  color: var(--bui-ink);
+  border-radius: 12px;
   padding: 12px 16px;
   max-width: 100%;
   font-family: var(--llm-message-font-family, inherit);
@@ -5905,10 +6024,10 @@
   width: 100%;
   box-sizing: border-box;
   overflow: hidden;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 0;
-  background: var(--llm-slate3);
-  box-shadow: none;
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-window);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-card);
 }
 
 .llm-agent-pending-action-shell > .llm-agent-hitl-card {
@@ -5934,8 +6053,9 @@
   list-style: none;
   font-size: var(--llm-text-small);
   font-weight: 600;
-  color: var(--llm-slate12);
-  padding: 2px 0;
+  color: var(--bui-ink-2);
+  padding: 2px 6px;
+  border-radius: var(--bui-radius-chip);
   transition: none;
 }
 
@@ -5973,7 +6093,8 @@
 
 .llm-agent-reasoning-summary:hover,
 .llm-agent-reasoning-summary:focus-visible {
-  color: var(--llm-indigo11);
+  color: var(--bui-ink);
+  background: var(--bui-hover);
 }
 
 .llm-agent-reasoning[open] > .llm-agent-reasoning-summary::after {
@@ -5985,7 +6106,7 @@
   flex-direction: column;
   gap: 8px;
   padding: 4px 0 6px 10px;
-  border-left: 0;
+  border-inline-start: 1px solid var(--llm-thinking-rail);
   margin-left: 4px;
   margin-top: 2px;
 }
@@ -6151,9 +6272,9 @@
   gap: 6px;
   max-width: 100%;
   padding: 4px 8px;
-  border-radius: 0;
-  background: var(--llm-slate3);
-  color: var(--llm-slate12);
+  border-radius: var(--bui-radius-chip);
+  background: var(--bui-field);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   line-height: 1.25;
   overflow: visible;
@@ -6624,61 +6745,13 @@ label.llm-search-results-item:hover {
 }
 
 .llm-at-planning-drive {
-  display: grid;
-  flex: 0 0 13px;
-  grid-template-columns: repeat(3, 3.5px);
-  gap: 1.25px;
-  width: 13px;
   margin-block-start: 3px;
-  color: var(--llm-slate12);
-}
-
-.llm-at-planning-drive-pixel {
-  width: 3.5px;
-  height: 3.5px;
-  border-radius: 0;
-  background: currentColor;
-  opacity: 0.13;
-  animation: none;
-  animation-delay: var(--llm-stable-animation-delay, 0ms);
-}
-
-.llm-at-planning-drive-pixel:nth-child(4) {
-  animation-delay: var(--llm-stable-animation-delay, 0ms);
-}
-
-.llm-at-planning-drive-pixel:nth-child(1),
-.llm-at-planning-drive-pixel:nth-child(5),
-.llm-at-planning-drive-pixel:nth-child(7) {
-  animation-delay: calc(var(--llm-stable-animation-delay, 0ms) + 90ms);
-}
-
-.llm-at-planning-drive-pixel:nth-child(2),
-.llm-at-planning-drive-pixel:nth-child(6),
-.llm-at-planning-drive-pixel:nth-child(8) {
-  animation-delay: calc(var(--llm-stable-animation-delay, 0ms) + 180ms);
-}
-
-.llm-at-planning-drive-pixel:nth-child(3),
-.llm-at-planning-drive-pixel:nth-child(9) {
-  animation-delay: calc(var(--llm-stable-animation-delay, 0ms) + 270ms);
+  color: var(--bui-accent-ink);
 }
 
 .llm-text-shimmer {
   color: var(--llm-slate11);
   animation: none;
-}
-
-@keyframes llm-planning-drive-pixel {
-  0%,
-  100% {
-    opacity: 0.13;
-    transform: scale(0.92);
-  }
-  45% {
-    opacity: 0.95;
-    transform: scale(1);
-  }
 }
 
 @keyframes llm-planning-text-shimmer {
@@ -6691,17 +6764,8 @@ label.llm-search-results-item:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .llm-at-planning-drive-pixel,
   .llm-text-shimmer {
     animation: none;
-  }
-
-  .llm-at-planning-drive-pixel {
-    opacity: 0.45;
-    transform: none;
-  }
-
-  .llm-text-shimmer {
     background: none;
     color: var(--llm-slate12);
   }
@@ -8192,11 +8256,12 @@ label.llm-search-results-item:hover {
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 8px;
-  padding: 12px 16px;
+  padding: 8px 0;
+  color: var(--bui-ink-2);
 }
 
 .llm-typing-text {
-  color: var(--llm-slate12);
+  font-weight: 500;
   font-size: var(--llm-text-small);
   line-height: 1.35;
 }
@@ -8255,44 +8320,6 @@ label.llm-search-results-item:hover {
   /* A standalone window the user switched to light keeps a flat card. */
   #llmforzotero-standalone-chat-root[data-standalone-theme="light"] .llm-panel {
     --llm-task-progress-shadow: none;
-  }
-}
-
-.llm-typing-dot {
-  width: 6px;
-  height: 6px;
-  background: var(--llm-slate3);
-  border-radius: 50%;
-  animation: none;
-  animation-delay: var(--llm-stable-animation-delay, 0ms);
-}
-
-.llm-typing-dot:nth-child(1) {
-  animation-delay: calc(var(--llm-stable-animation-delay, 0ms) - 320ms);
-}
-
-.llm-typing-dot:nth-child(2) {
-  animation-delay: calc(var(--llm-stable-animation-delay, 0ms) - 160ms);
-}
-
-@keyframes llm-typing-bounce {
-  0%,
-  80%,
-  100% {
-    transform: scale(0.6);
-    opacity: 0.5;
-  }
-  40% {
-    transform: scale(1);
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .llm-typing-dot {
-    animation: none;
-    opacity: 0.7;
-    transform: none;
   }
 }
 
@@ -9550,8 +9577,8 @@ label.llm-search-results-item:hover {
 }
 
 .llm-input-section.llm-input-drop-active {
-  border-color: var(--llm-slate7);
-  background: var(--llm-slate5);
+  border-color: var(--bui-accent-ink);
+  background: var(--bui-accent-tint);
 }
 
 /* Research context: comment first, source second, one focused detail. */
@@ -10295,8 +10322,8 @@ label.llm-search-results-item:hover {
 }
 
 .llm-input.llm-input-drop-active {
-  border-color: var(--llm-slate7);
-  background: var(--llm-slate5);
+  border-color: var(--bui-accent-ink);
+  background: var(--bui-accent-tint);
 }
 
 .llm-context-previews {
@@ -10333,9 +10360,9 @@ label.llm-search-results-item:hover {
   gap: 8px;
   min-height: 26px;
   padding: 3px 10px 3px 8px;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   border: 0.5px solid var(--llm-slate7);
-  background: var(--llm-slate3);
+  background: var(--bui-field);
   color: var(--llm-slate12);
   font-size: inherit;
   line-height: 1.2;
@@ -10434,14 +10461,15 @@ label.llm-search-results-item:hover {
   gap: 4px;
   min-width: 0;
   padding: 8px;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 20px;
-  background: var(--llm-slate2);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-window);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-card);
   flex: 0 0 auto;
 }
 
 .llm-compose-area:focus-within {
-  border-color: var(--llm-slate8);
+  border-color: var(--bui-accent-ink);
 }
 
 .llm-paper-context-inline {
@@ -13933,8 +13961,8 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-radius: 0;
   border: none;
   background: transparent;
-  color: var(--llm-ui-ink);
-  caret-color: var(--llm-ui-ink);
+  color: var(--bui-ink);
+  caret-color: var(--bui-accent-ink);
   font-size: var(--llm-text-body);
 }
 
@@ -13950,7 +13978,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 
 .llm-input::placeholder {
   /* Own the hint ink even when the native light control theme remains active. */
-  color: var(--llm-slate11) !important;
+  color: var(--bui-ink-2) !important;
   opacity: 1;
 }
 
@@ -14130,8 +14158,20 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   font-weight: 600;
 }
 
+.llm-send-btn.llm-action-btn-primary {
+  background: var(--bui-ink);
+  border-color: var(--llm-slate12);
+  color: var(--bui-surface);
+  font-weight: 600;
+}
+
 .llm-action-btn-primary:hover:not(:disabled) {
   background: var(--llm-slate11);
+  border-color: var(--llm-slate11);
+}
+
+.llm-send-btn.llm-action-btn-primary:hover:not(:disabled) {
+  background: var(--bui-ink-2);
   border-color: var(--llm-slate11);
 }
 
@@ -14262,7 +14302,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border-radius: 4px;
   border: 0.5px solid var(--llm-slate7);
   background: var(--llm-slate1);
-  box-shadow: none;
+  box-shadow: var(--bui-shadow-overlay, none);
   padding: 0;
   min-width: unset;
 }
@@ -14324,11 +14364,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   outline-offset: calc(-1 * var(--llm-focus-ring-width, 2px));
 }
 
-/* Send and Cancel sit outside that clip, so their ring keeps a gap and stays
-   legible on a filled circle. */
+/* Send and Cancel sit outside that clip, so their ring can keep a gap. */
 .llm-send-btn:focus-visible,
 .llm-cancel-btn:focus-visible {
-  outline: 2px solid var(--llm-indigo8);
+  outline: 2px solid var(--bui-accent-ink);
   outline-offset: var(--llm-focus-ring-width, 2px);
 }
 
@@ -14343,7 +14382,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   height: 32px;
   min-height: 32px;
   padding: 0;
-  border-radius: 50%;
+  border-radius: var(--bui-radius-control);
   font-size: 0;
   line-height: 0;
   display: inline-flex;
@@ -14376,7 +14415,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   min-height: var(--llm-ui-control-height);
   padding: 4px 12px;
   gap: 4px;
-  border-radius: 16px;
+  border-radius: var(--bui-radius-control);
   font: inherit;
   font-weight: 600;
   line-height: 1.5;
@@ -14387,13 +14426,13 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 
 .llm-cancel-btn,
 .llm-cancel-btn.llm-action-icon-only {
-  background: var(--llm-slate12);
+  background: var(--bui-ink);
   border-color: var(--llm-slate12);
-  color: var(--llm-slate1);
+  color: var(--bui-surface);
 }
 
 .llm-cancel-btn:hover:not(:disabled) {
-  background: var(--llm-slate11);
+  background: var(--bui-ink-2);
   border-color: var(--llm-slate11);
 }
 
@@ -15096,14 +15135,14 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   line-height: 1.2;
   white-space: nowrap;
   text-align: start;
-  color: var(--llm-ui-muted);
+  color: var(--bui-ink-2);
   background: transparent;
   border: none;
-  border-radius: 0;
+  border-radius: var(--bui-radius-control);
   box-shadow: none;
 }
 .llm-model-controls button:hover:not(:disabled) {
-  background: var(--llm-ui-surface-soft);
+  background: var(--bui-hover);
 }
 
 .llm-model-btn::after,
@@ -15156,7 +15195,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   border: 0.5px solid var(--llm-slate7);
   border-radius: 4px;
   padding: calc(4px * var(--llm-font-scale, 1));
-  box-shadow: none;
+  box-shadow: var(--bui-shadow-overlay, none);
 }
 
 .llm-model-menu-open,
@@ -16941,13 +16980,15 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 
 .llm-context-previews
   > [data-context-group="current"]:not(.llm-context-group-label) {
-  border-color: var(--llm-redesign-border-strong);
-  background: var(--llm-redesign-surface-raised);
+  border-color: var(--bui-line-strong);
+  background: var(--bui-surface);
+  border-radius: var(--bui-radius-chip);
 }
 
 .llm-context-previews > [data-context-group="added"] {
-  border-color: var(--llm-redesign-border);
-  background: var(--llm-redesign-surface-soft);
+  border-color: var(--bui-line);
+  background: var(--bui-field);
+  border-radius: var(--bui-radius-chip);
 }
 
 @media (max-width: 420px) {
