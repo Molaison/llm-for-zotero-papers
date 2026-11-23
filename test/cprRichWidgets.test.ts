@@ -105,8 +105,13 @@ describe("CPR papers rich widget boundary", function () {
     const controls = root.children[0]!.children[1]!.children;
     const plotted = () => root.children[1]!.children[0]!.children.filter(el => el.tagName === "rect");
     assert.lengthOf(plotted(), 2);
-    controls.find(b => b.textContent === "数据表")!.click();
+    const tableToggle = controls.find(b => b.textContent === "数据表")!;
+    assert.equal(tableToggle.attrs.get("aria-expanded"), "false");
+    tableToggle.click();
     assert.isFalse(root.children[3]!.hidden);
+    assert.equal(tableToggle.attrs.get("aria-expanded"), "true");
+    tableToggle.click();
+    assert.isTrue(root.children[3]!.hidden);
     controls.find(b => b.textContent === "B")!.click();
     assert.lengthOf(plotted(), 1);
     controls.find(b => b.textContent === "B")!.click();
@@ -138,8 +143,11 @@ describe("CPR papers rich widget boundary", function () {
     assert.lengthOf(piePaths(), 2);
     pieRoot.children[1]!.children.find(button => button.textContent === "B")!.click();
     assert.lengthOf(piePaths(), 1);
-    pieRoot.children[1]!.children.find(button => button.textContent === "数据表")!.click();
+    const specialTableToggle = pieRoot.children[1]!.children.find(button => button.textContent === "数据表")!;
+    assert.equal(specialTableToggle.attrs.get("aria-expanded"), "false");
+    specialTableToggle.click();
     assert.isFalse(pieRoot.children[4]!.hidden);
+    assert.equal(specialTableToggle.attrs.get("aria-expanded"), "true");
     const heatmapRoot = extensions.children[2]!;
     const heatmapRects = () => heatmapRoot.children[2]!.children[0]!.children.filter(el => el.tagName === "rect");
     assert.lengthOf(heatmapRects(), 12);

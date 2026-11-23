@@ -254,8 +254,7 @@ describe("reading sidebar design system", function () {
       ".llm-history-menu-search-input",
     ]) {
       const hint = body(selector + "::placeholder");
-      const ink = selector === ".llm-input" ? "--bui-ink-2" : "--llm-slate11";
-      assert.include(hint, `color: var(${ink}) !important`);
+      assert.include(hint, "color: var(--bui-ink-2) !important");
       assert.include(hint, "opacity: 1");
     }
     assert.match(

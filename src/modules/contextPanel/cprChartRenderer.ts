@@ -21,13 +21,13 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
     root.className = "llm-cpr-rich-chart";
 
     const heading = doc.createElement("div");
-    heading.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px";
+    heading.className = "llm-cpr-chart-header";
     const title = doc.createElement("strong");
     title.textContent = chart.title || `${chart.yField} / ${chart.xField}`;
-    title.style.cssText = "flex:1;min-width:120px;overflow-wrap:anywhere";
+    title.className = "llm-cpr-chart-title";
     heading.appendChild(title);
     const chartRegion = doc.createElement("div");
-    chartRegion.style.cssText = "width:100%;overflow-x:auto";
+    chartRegion.className = "llm-cpr-chart-plot";
     const table = doc.createElement("table");
     table.hidden = true;
     table.className = "llm-cpr-chart-table";
@@ -58,7 +58,7 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
     status.className = "llm-cpr-chart-status";
 
     const controls = doc.createElement("div");
-    controls.style.cssText = "display:flex;gap:5px;flex-wrap:wrap;align-items:center";
+    controls.className = "llm-cpr-chart-controls";
     const button = (label: string, handler: () => void) => {
       const element = doc.createElement("button");
       element.type = "button";
@@ -154,7 +154,12 @@ export function renderCprChartWidgets(host: HTMLElement, attachments: readonly C
     button("←", () => { start = Math.max(0, start - Math.ceil(categories.length / zoom)); draw(); });
     button("→", () => { start += Math.ceil(categories.length / zoom); draw(); });
     button("重置", () => { zoom = 1; start = 0; draw(); });
-    button("数据表", () => { tableVisible = !tableVisible; table.hidden = !tableVisible; });
+    const tableToggle = button("数据表", () => {
+      tableVisible = !tableVisible;
+      table.hidden = !tableVisible;
+      tableToggle.setAttribute("aria-expanded", String(tableVisible));
+    });
+    tableToggle.setAttribute("aria-expanded", "false");
     for (const [index, name] of series.entries()) {
       if (series.length === 1) break;
       const toggle = button(name, () => {

@@ -81,4 +81,12 @@ describe("single reading workspace native viewport contract", () => {
     assert.notMatch(rule!, /!important/);
   });
 
+  it("anchors the scrollable content to the workspace-sized drawer", () => {
+    const css = readFileSync("addon/content/zoteroPane.css", "utf8");
+    assert.match(css, /\.llm-annotation-drawer\s*\{[^}]*position:\s*relative;/);
+    assert.match(
+      css,
+      /\.llm-annotation-drawer-content\s*\{[^}]*position:\s*absolute;\s*inset:\s*0;/,
+    );
+  });
 });
