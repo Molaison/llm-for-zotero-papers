@@ -3,18 +3,25 @@
    https://github.com/slev12397/beautiful-ui/tree/44a274e598395ab61e7c96c26fda2758780253b7
    See vendor/beautiful-ui/LICENSE.txt. */
 
-:where(.llm-panel, #llmforzotero-standalone-chat-root) {
+:where(
+  .llm-panel,
+  .llm-standalone-search-overlay,
+  #llmforzotero-standalone-chat-root
+) {
   --bui-radius-chip: 6px;
   --bui-radius-control: 8px;
+  --bui-radius-card: 10px;
   --bui-radius-window: 14px;
 }
 
 :where(
   .llm-panel:not(#llmforzotero-standalone-chat-root *),
+  .llm-standalone-search-overlay:not(#llmforzotero-standalone-chat-root *),
   #llmforzotero-standalone-chat-root
 ) {
   --bui-canvas: oklch(0.961 0.002 247.84);
   --bui-surface: oklch(1 0 0);
+  --bui-inset: oklch(0.979 0.002 247.839);
   --bui-hover: oklch(0.97 0.002 247.839);
   --bui-field: oklch(0.961 0.001 286.375);
   --bui-ink: oklch(0.247 0.006 258.361);
@@ -32,9 +39,16 @@
 /* A standalone window's theme override takes precedence over the host. */
 :where(.window-is-dark, :root[lwtheme-brighttext])
   .llm-panel:not(#llmforzotero-standalone-chat-root *),
+:where(.window-is-dark, :root[lwtheme-brighttext])
+  .llm-standalone-search-overlay:not(
+    #llmforzotero-standalone-chat-root *,
+    .llm-history-search-theme-light
+  ),
+.llm-standalone-search-overlay.llm-history-search-theme-dark,
 #llmforzotero-standalone-chat-root[data-standalone-theme="dark"] {
   --bui-canvas: oklch(0.231 0.004 264.487);
   --bui-surface: oklch(0.26 0.006 271.191);
+  --bui-inset: oklch(0.243 0.004 264.492);
   --bui-hover: oklch(0.289 0.006 271.22);
   --bui-field: oklch(0.293 0.006 271.223);
   --bui-ink: oklch(0.964 0.002 247.839);
@@ -49,9 +63,14 @@
 
 @media (prefers-color-scheme: dark) {
   .llm-panel:not(#llmforzotero-standalone-chat-root *),
+  .llm-standalone-search-overlay:not(
+    #llmforzotero-standalone-chat-root *,
+    .llm-history-search-theme-light
+  ),
   #llmforzotero-standalone-chat-root:not([data-standalone-theme="light"]) {
     --bui-canvas: oklch(0.231 0.004 264.487);
     --bui-surface: oklch(0.26 0.006 271.191);
+    --bui-inset: oklch(0.243 0.004 264.492);
     --bui-hover: oklch(0.289 0.006 271.22);
     --bui-field: oklch(0.293 0.006 271.223);
     --bui-ink: oklch(0.964 0.002 247.839);
@@ -597,7 +616,7 @@
   min-width: 0;
   min-height: 32px;
   padding: 4px 8px;
-  color: var(--llm-slate12);
+  color: var(--bui-ink);
 }
 .llm-scope-bar[hidden] {
   display: none;
@@ -606,7 +625,7 @@
   flex: 0 0 16px;
   width: 16px;
   height: 16px;
-  background: var(--llm-slate11);
+  background: var(--bui-ink-2);
   mask: url("icons/action-paper.svg") center / contain no-repeat;
 }
 .llm-scope-copy {
@@ -617,8 +636,11 @@
 }
 .llm-scope-kind {
   flex: 0 0 auto;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
+  background: var(--bui-field);
+  border-radius: var(--bui-radius-chip);
+  padding: 1px 5px;
 }
 .llm-scope-title {
   min-width: 0;
@@ -626,13 +648,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--llm-text-control);
-  font-weight: 500;
+  font-weight: 600;
 }
 .llm-scope-availability {
   grid-column: 1 / -1;
   margin: 0;
   padding: 0 8px 8px;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   line-height: 1.5;
 }
@@ -730,14 +752,15 @@
   list-style: none;
   cursor: pointer;
   padding: 4px 8px;
-  border-radius: 8px;
-  color: var(--llm-ui-muted);
+  border-radius: var(--bui-radius-control);
+  color: var(--bui-ink-2);
   font: inherit;
   font-weight: 400;
 }
 .llm-conversation-tools > summary:hover,
 .llm-conversation-tools[open] > summary {
-  background: var(--llm-ui-surface-soft);
+  background: var(--bui-hover);
+  color: var(--bui-ink);
 }
 .llm-conversation-tools-body {
   position: absolute;
@@ -748,10 +771,10 @@
   width: max-content;
   max-width: min(280px, 80vw);
   padding: var(--llm-ui-space-1);
-  border: 0.5px solid var(--llm-ui-border);
-  border-radius: 4px;
-  background: var(--llm-ui-surface);
-  box-shadow: none;
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-card);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-overlay);
   max-height: min(70vh, 560px);
   overflow-y: auto;
 }
@@ -767,7 +790,7 @@
   line-height: 1.5;
   text-align: start;
   white-space: normal;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   font-size: var(--llm-text-control);
 }
 .llm-conversation-tools-body > button::before {
@@ -1970,7 +1993,7 @@
   flex-direction: row;
   flex-shrink: 0;
   width: calc(var(--llm-standalone-sidebar-panel-width, 220px) + 5px);
-  background: var(--llm-standalone-sidebar-surface-bg);
+  background: var(--bui-inset);
   overflow: hidden;
   transition: none;
 }
@@ -2196,12 +2219,12 @@
   flex-direction: column;
   width: min(90%, 480px);
   max-height: 60vh;
-  background: var(--llm-popup-surface-bg);
-  border: 0.5px solid var(--llm-popup-surface-border);
-  border-radius: 12px;
+  background: var(--bui-surface);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-window);
   padding: 4px;
   box-sizing: border-box;
-  box-shadow: none;
+  box-shadow: var(--bui-shadow-overlay);
   overflow: hidden;
 }
 
@@ -2212,21 +2235,14 @@
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
-  background: var(--llm-popup-surface-bg);
+  background: var(--bui-surface);
   border: 0 !important;
-  border-bottom: 0 !important;
+  border-bottom: 0.5px solid var(--bui-line) !important;
   box-shadow: none !important;
 }
 
-.llm-standalone-search-header::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  background: var(--llm-popup-surface-bg);
-  pointer-events: none;
+.llm-standalone-search-header > .llm-standalone-nav-icon {
+  color: var(--bui-ink-2);
 }
 
 .llm-standalone-search-input {
@@ -2237,17 +2253,18 @@
   border: 0 !important;
   border-bottom: 0 !important;
   background: transparent;
-  color: var(--llm-slate12);
+  color: var(--bui-ink);
   font: inherit;
   font-size: var(--llm-text-small);
   line-height: 1.4;
   outline: none !important;
   box-shadow: none !important;
+  caret-color: var(--bui-accent-ink);
 }
 
 .llm-standalone-search-input::placeholder {
   /* Own the hint ink even when the native light control theme remains active. */
-  color: var(--llm-slate11) !important;
+  color: var(--bui-ink-2) !important;
   opacity: 1;
 }
 
@@ -2261,22 +2278,22 @@
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--bui-radius-control);
   background: transparent;
-  color: var(--llm-slate12);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   cursor: pointer;
   line-height: 1;
 }
 
 .llm-standalone-search-close:focus-visible {
-  outline: 2px solid var(--llm-indigo8);
+  outline: 2px solid var(--bui-accent-ink);
   outline-offset: 1px;
 }
 
 .llm-standalone-search-close:hover {
-  background: var(--llm-slate4);
-  color: var(--llm-slate12);
+  background: var(--bui-hover);
+  color: var(--bui-ink);
 }
 
 .llm-standalone-search-results {
@@ -2289,14 +2306,14 @@
   overflow-y: auto;
   overflow-x: hidden;
   padding: 6px 8px 12px;
-  background: var(--llm-popup-surface-bg);
+  background: var(--bui-surface);
   border: 0 !important;
   border-top: 0 !important;
   box-shadow: none !important;
 }
 
 .llm-standalone-search-empty {
-  color: var(--llm-slate12);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   padding: 16px 8px;
   text-align: center;
@@ -2305,7 +2322,7 @@
 .llm-standalone-search-day-label {
   font-size: var(--llm-text-small);
   font-weight: 600;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 10px 6px 3px;
@@ -2321,9 +2338,9 @@
   width: 100%;
   padding: 7px 8px;
   border: none;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   background: none;
-  color: var(--llm-slate12);
+  color: var(--bui-ink);
   font: inherit;
   font-size: var(--llm-text-small);
   text-align: left;
@@ -2341,11 +2358,11 @@
 }
 
 .llm-standalone-search-item:hover {
-  background: var(--llm-slate4);
+  background: var(--bui-hover);
 }
 
 .llm-standalone-search-item:focus-visible {
-  outline: 2px solid var(--llm-indigo8);
+  outline: 2px solid var(--bui-accent-ink);
   outline-offset: -2px;
 }
 
@@ -2359,26 +2376,26 @@
   text-overflow: ellipsis;
   max-width: 45%;
   padding: 1px 6px;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   line-height: 1.5;
 }
 
 .llm-standalone-search-label[data-label-type="paper"],
 .llm-history-item-scope-chip[data-label-type="paper"] {
-  color: var(--llm-history-paper-chip-text);
-  background: var(--llm-history-paper-chip-bg);
+  color: var(--bui-ink-2, var(--llm-history-paper-chip-text));
+  background: var(--bui-field, var(--llm-history-paper-chip-bg));
 }
 
 .llm-standalone-search-label[data-label-type="library"],
 .llm-history-item-scope-chip[data-label-type="library"] {
-  color: var(--llm-history-library-chip-text);
-  background: var(--llm-history-library-chip-bg);
+  color: var(--bui-ink-2, var(--llm-history-library-chip-text));
+  background: var(--bui-field, var(--llm-history-library-chip-bg));
 }
 
 .llm-standalone-search-label[data-label-type="orphan"],
 .llm-history-item-scope-chip[data-label-type="orphan"] {
-  color: var(--llm-history-orphan-chip-text);
-  background: var(--llm-history-orphan-chip-bg);
+  color: var(--bui-ink-2, var(--llm-history-orphan-chip-text));
+  background: var(--bui-field, var(--llm-history-orphan-chip-bg));
 }
 
 .llm-standalone-search-title {
@@ -2394,13 +2411,11 @@
   width: 20px;
   height: 20px;
   display: flex;
-  opacity: 0;
-  pointer-events: none;
   align-items: center;
   justify-content: center;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   cursor: pointer;
-  color: var(--llm-red11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   margin-left: 4px;
 }
@@ -2409,21 +2424,15 @@
   content: "\00D7";
 }
 
-/* Keep the slot and tab sequence stable as a result gains keyboard focus. */
-.llm-standalone-search-item:hover .llm-standalone-search-delete,
-.llm-standalone-search-item:focus-within .llm-standalone-search-delete {
-  opacity: 1;
-  pointer-events: auto;
-}
 .llm-standalone-search-delete:focus-visible {
-  outline: 2px solid var(--llm-indigo8);
+  outline: 2px solid var(--bui-accent-ink);
   outline-offset: 1px;
 }
 
 .llm-standalone-search-delete:hover,
 .llm-standalone-search-delete:focus-visible {
   background: var(--llm-red4);
-  color: var(--llm-indigo11);
+  color: var(--llm-red11);
 }
 
 .llm-standalone-search-meta,
@@ -2892,9 +2901,9 @@
   padding: 0 8px;
   box-sizing: border-box;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--bui-radius-control);
   background: transparent;
-  color: var(--llm-slate12);
+  color: var(--bui-ink);
   cursor: pointer;
   font: inherit;
   font-size: var(--llm-text-small);
@@ -2905,8 +2914,8 @@
 }
 
 .llm-standalone-nav-row:hover {
-  background: var(--llm-slate4);
-  color: var(--llm-slate12);
+  background: var(--bui-hover);
+  color: var(--bui-ink);
 }
 
 .llm-standalone-nav-row:active {
@@ -2941,7 +2950,7 @@
   height: 1px;
   flex: 0 0 1px;
   margin: 10px 12px;
-  background: var(--llm-slate3);
+  background: var(--bui-line);
 }
 
 .llm-standalone-primary-action-group {
@@ -2972,16 +2981,16 @@
   flex: 0 0 32px;
   padding: 0;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--bui-radius-control);
   background: transparent;
-  color: var(--llm-slate12);
+  color: var(--bui-ink-2);
   cursor: pointer;
   transition: none;
 }
 
 .llm-standalone-nav-aux-action:hover:not(:disabled) {
-  background: var(--llm-slate4);
-  color: var(--llm-slate12);
+  background: var(--bui-hover);
+  color: var(--bui-ink);
 }
 
 .llm-standalone-nav-aux-action:focus-visible {
@@ -3030,7 +3039,7 @@
 }
 
 .llm-standalone-sidebar-empty {
-  color: var(--llm-slate12);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   padding: 16px 6px;
   text-align: center;
@@ -3039,7 +3048,7 @@
 .llm-standalone-day-label {
   font-size: var(--llm-text-small);
   font-weight: 600;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 14px 10px 6px;
@@ -3055,9 +3064,9 @@
   padding: 0 10px;
   box-sizing: border-box;
   border: none;
-  border-radius: 0;
+  border-radius: var(--bui-radius-control);
   background: none;
-  color: var(--llm-slate12);
+  color: var(--bui-ink);
   font-size: var(--llm-text-small);
   text-align: left;
   cursor: pointer;
@@ -3165,12 +3174,12 @@
 }
 
 .llm-standalone-conv-item:hover {
-  background: var(--llm-slate4);
+  background: var(--bui-hover);
 }
 
 .llm-standalone-conv-item.active {
-  background: var(--llm-slate5);
-  color: var(--llm-slate12);
+  background: var(--bui-accent-tint);
+  color: var(--bui-accent-ink);
   font-weight: 500;
 }
 
@@ -3645,25 +3654,69 @@
 /* Validated chart controls use UI tokens; series/heatmap encodings remain data. */
 .llm-cpr-rich-chart {
   margin: 12px 0;
-  padding: 8px 0;
+  padding: 12px;
   max-width: 100%;
   overflow: hidden;
+  box-sizing: border-box;
+  background: var(--bui-surface);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-window);
 }
+
+.llm-cpr-chart-header,
+.llm-cpr-chart-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.llm-cpr-chart-header {
+  margin-bottom: 8px;
+}
+
+.llm-cpr-chart-title {
+  display: block;
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--bui-ink);
+}
+
+.llm-cpr-rich-chart > .llm-cpr-chart-controls {
+  margin-block: 6px 8px;
+}
+
+.llm-cpr-chart-plot {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-inset);
+}
+
 .llm-cpr-chart-table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--llm-text-small);
   overflow-wrap: anywhere;
 }
+.llm-cpr-chart-table th {
+  background: var(--bui-field);
+  color: var(--bui-ink);
+}
 .llm-cpr-chart-table :is(th, td) {
-  padding: 4px;
+  padding: 6px 8px;
   text-align: start;
   border-bottom: 0.5px solid var(--llm-slate6);
+  border-bottom-color: var(--bui-line);
 }
 .llm-cpr-chart-status {
   font-size: var(--llm-text-small);
-  color: var(--llm-slate11);
-  margin: 4px 0;
+  color: var(--bui-ink-2);
+  margin: 6px 0;
+  background: var(--bui-inset);
+  border-radius: var(--bui-radius-chip);
+  padding: 4px 8px;
 }
 .llm-cpr-chart-status:empty {
   display: none;
@@ -3675,20 +3728,27 @@
   height: auto;
   padding: 4px 8px;
   font: inherit;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 0;
-  background: var(--llm-slate3);
-  color: var(--llm-slate12);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-chip);
+  background: var(--bui-surface);
+  color: var(--bui-ink-2);
   cursor: pointer;
 }
 .llm-cpr-chart-control:hover {
-  background: var(--llm-slate4);
+  background: var(--bui-hover);
+  color: var(--bui-ink);
+}
+.llm-cpr-chart-control[aria-pressed="true"],
+.llm-cpr-chart-control[aria-expanded="true"] {
+  background: var(--bui-accent-tint);
+  color: var(--bui-accent-ink);
 }
 .llm-cpr-chart-swatch {
   display: inline-block;
   width: 8px;
   height: 8px;
   flex: 0 0 8px;
+  border-radius: 50%;
 }
 
 /* Messages Area */
@@ -4143,12 +4203,12 @@
   max-width: min(90vw, 360px);
   max-height: min(52vh, 340px);
   overflow-y: auto;
-  background: var(--llm-slate1);
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
+  background: var(--bui-surface);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-card);
   padding: calc(6px * var(--llm-font-scale, 1));
   box-sizing: border-box;
-  box-shadow: none;
+  box-shadow: var(--bui-shadow-overlay);
   align-items: stretch;
 }
 
@@ -4344,10 +4404,10 @@
   -moz-appearance: none;
   width: 100%;
   min-width: 0;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--llm-slate12);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-inset);
+  color: var(--bui-ink-2);
   font: inherit;
   font-size: var(--llm-text-small);
   line-height: 1.25;
@@ -4359,18 +4419,18 @@
 
 .llm-history-menu-search-trigger:hover,
 .llm-history-menu-search-trigger:focus-visible {
-  color: var(--llm-indigo11);
-  border-color: var(--llm-slate8);
-  background: var(--llm-slate1);
+  color: var(--bui-ink);
+  border-color: var(--bui-accent-ink);
+  background: var(--bui-hover);
 }
 
 .llm-history-menu-search-input {
   width: 100%;
   min-width: 0;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
-  background: var(--llm-slate1);
-  color: var(--llm-slate12);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-inset);
+  color: var(--bui-ink);
   font: inherit;
   font-size: var(--llm-text-small);
   line-height: 1.25;
@@ -4380,7 +4440,7 @@
 
 .llm-history-menu-search-input::placeholder {
   /* Own the hint ink even when the native light control theme remains active. */
-  color: var(--llm-slate11) !important;
+  color: var(--bui-ink-2) !important;
   opacity: 1;
 }
 
@@ -4456,22 +4516,22 @@
   align-items: stretch;
   gap: 4px;
   width: 100%;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
-  background: transparent;
+  border: 0.5px solid var(--bui-line);
+  border-radius: var(--bui-radius-chip);
+  background: var(--bui-surface);
   padding: 4px 0;
   margin: 0;
   overflow: hidden;
 }
 
 .llm-history-menu-row:hover {
-  border-color: var(--llm-slate8);
-  background: var(--llm-slate1);
+  border-color: var(--bui-line-strong);
+  background: var(--bui-hover);
 }
 
 .llm-history-menu-row.active {
-  border-color: var(--llm-slate7);
-  background: transparent;
+  border-color: var(--bui-line);
+  background: var(--bui-accent-tint);
 }
 
 .llm-history-menu-row.active::before {
@@ -4480,8 +4540,8 @@
   left: 0;
   top: 0;
   bottom: 0;
-  width: 3px;
-  background: var(--llm-slate1);
+  width: 2px;
+  background: var(--bui-accent-ink);
 }
 
 .llm-history-menu-row.pending-delete {
@@ -5759,7 +5819,8 @@
   width: 32px;
   min-height: 32px;
   cursor: pointer;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
+  border-radius: var(--bui-radius-control);
 }
 .llm-answer-more-body {
   position: fixed;
@@ -5769,9 +5830,10 @@
   width: max-content;
   max-width: min(300px, 70vw);
   padding: 8px;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
-  background: var(--llm-slate1);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-card);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-overlay);
 }
 .llm-answer-more:not([open]) > .llm-answer-more-body {
   display: none;
@@ -5786,18 +5848,19 @@
   font: inherit;
   font-size: var(--llm-text-small);
   white-space: normal;
+  border-radius: var(--bui-radius-chip);
 }
 .llm-answer-more-body > button::before {
   display: none;
 }
 .llm-answer-more-body > button:hover {
-  background: var(--llm-slate3);
+  background: var(--bui-hover);
 }
 .llm-bubble.assistant.llm-answer-error {
   padding: 16px;
   box-sizing: border-box;
   border: 0.5px solid var(--llm-red7);
-  border-radius: 4px;
+  border-radius: var(--bui-radius-window);
   background: var(--llm-red2);
 }
 .llm-answer-error > .llm-answer-label {
@@ -5857,16 +5920,16 @@
   height: auto;
   min-height: 32px;
   padding: 4px 10px;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 8px;
-  background: var(--llm-slate3);
-  color: var(--llm-slate12);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-surface);
+  color: var(--bui-ink);
   font: inherit;
   font-size: var(--llm-text-small);
   line-height: 1.2;
 }
 .llm-message-meta .llm-recovery-action:hover:not(:disabled) {
-  background: var(--llm-slate4);
+  background: var(--bui-hover);
 }
 
 .llm-message-action::before {
@@ -9583,6 +9646,7 @@ label.llm-search-results-item:hover {
 
 /* Research context: comment first, source second, one focused detail. */
 .llm-annotation-drawer {
+  position: relative;
   width: 100%;
   min-width: 0;
   min-height: 0;
@@ -9591,8 +9655,8 @@ label.llm-search-results-item:hover {
   margin: 0;
   border: none;
   border-radius: 0;
-  background: var(--llm-slate1);
-  color: var(--llm-slate12);
+  background: var(--bui-surface);
+  color: var(--bui-ink);
   font: inherit;
   overflow: hidden;
   flex: 1 1 0;
@@ -9643,6 +9707,7 @@ label.llm-search-results-item:hover {
   position: static;
   min-width: 0;
   max-width: 100%;
+  border-radius: var(--bui-radius-control);
 }
 .llm-paper-heading {
   flex: 1;
@@ -9654,7 +9719,7 @@ label.llm-search-results-item:hover {
 }
 .llm-paper-mode {
   margin-inline-start: auto;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
 }
 .llm-source-shortcut::before {
@@ -9679,7 +9744,7 @@ label.llm-search-results-item:hover {
   display: none;
 }
 .llm-source-toggle:hover {
-  background: var(--llm-slate4);
+  background: var(--bui-hover);
 }
 .llm-source-toggle {
   display: flex;
@@ -9688,14 +9753,18 @@ label.llm-search-results-item:hover {
   list-style: none;
   min-height: 32px;
   padding: 4px 8px;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   cursor: pointer;
   font-size: var(--llm-text-small);
-  border-radius: 8px;
-  background: var(--llm-slate3);
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-field);
   box-sizing: border-box;
   min-width: 0;
   max-width: 260px;
+}
+.llm-source-control[open] > .llm-source-toggle {
+  background: var(--bui-accent-tint);
+  color: var(--bui-accent-ink);
 }
 .llm-source-body {
   position: absolute;
@@ -9712,9 +9781,10 @@ label.llm-search-results-item:hover {
   max-height: 40vh;
   overflow: auto;
   padding: 8px;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
-  background: var(--llm-slate1);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-card);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-overlay);
 }
 #llm-source-control #llm-paper-context-preview,
 #llm-source-control .llm-paper-context-chip {
@@ -9734,7 +9804,7 @@ label.llm-search-results-item:hover {
   margin: 0;
   min-width: 0;
   max-width: 100%;
-  color: var(--llm-slate12);
+  color: var(--bui-ink);
   font-size: var(--llm-text-control);
   font-weight: 500;
   line-height: 1.5;
@@ -9751,14 +9821,18 @@ label.llm-search-results-item:hover {
   outline-offset: -1px;
 }
 .llm-annotation-toggle:hover {
-  background: var(--llm-slate4);
+  background: var(--bui-hover);
 }
 .llm-annotation-toggle[aria-expanded="true"] {
-  background: var(--llm-slate5);
-  color: var(--llm-slate12);
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-accent-tint);
+  color: var(--bui-accent-ink);
 }
 .llm-annotation-drawer-content {
-  height: 100%;
+  /* Anchor to the workspace-sized drawer rather than Gecko's disclosure
+     content wrapper, which can report a shorter percentage height. */
+  position: absolute;
+  inset: 0;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -9807,10 +9881,10 @@ label.llm-search-results-item:hover {
 .llm-annotation-filter {
   font: inherit;
   line-height: 1.5;
-  color: var(--llm-ui-ink);
-  background: var(--llm-ui-surface);
-  border: 0.5px solid var(--llm-ui-border);
-  border-radius: 0;
+  color: var(--bui-ink);
+  background: var(--bui-surface);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-control);
   padding: 4px 8px;
   margin: 0;
   max-width: 100%;
@@ -9822,7 +9896,17 @@ label.llm-search-results-item:hover {
   cursor: pointer;
 }
 .llm-annotation-button:hover:not(:disabled) {
-  background: var(--llm-ui-surface-soft);
+  background: var(--bui-hover);
+}
+
+#llm-annotation-preview:not(:disabled) {
+  border-color: transparent;
+  background: var(--bui-ink);
+  color: var(--bui-surface);
+}
+
+#llm-annotation-preview:hover:not(:disabled) {
+  background: var(--bui-ink-2);
 }
 .llm-annotation-list {
   min-width: 0;
@@ -9834,14 +9918,16 @@ label.llm-search-results-item:hover {
   padding: 12px 6px;
   border-bottom: 0.5px solid var(--llm-slate6);
   align-items: start;
+  border-bottom-color: var(--bui-line);
+  border-radius: var(--bui-radius-control);
 }
 .llm-annotation-row > input {
   margin: 12px 0 0;
   align-self: start;
-  accent-color: var(--llm-ui-accent);
+  accent-color: var(--bui-accent-ink);
 }
 .llm-annotation-row[data-selected="true"] {
-  background: var(--llm-ui-selected);
+  background: var(--bui-accent-tint);
 }
 .llm-annotation-row-focus {
   display: grid;
@@ -9852,7 +9938,7 @@ label.llm-search-results-item:hover {
   color: inherit;
   background: transparent;
   border: 0.5px solid transparent;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   padding: var(--llm-ui-space-1);
   margin: 0;
   min-width: 0;
@@ -9863,13 +9949,16 @@ label.llm-search-results-item:hover {
 }
 .llm-annotation-row-focus > .llm-annotation-state {
   font-size: var(--llm-text-small);
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
+  background: var(--bui-field);
+  padding: 0 5px;
+  border-radius: var(--bui-radius-chip);
 }
 .llm-annotation-row-focus:hover {
-  background: var(--llm-ui-surface-soft);
+  background: var(--bui-hover);
 }
 .llm-annotation-row-focus[aria-expanded="true"] {
-  border-color: var(--llm-ui-muted);
+  border-color: var(--bui-accent-ink);
 }
 .llm-annotation-row-comment {
   grid-column: 1;
@@ -9901,16 +9990,17 @@ label.llm-search-results-item:hover {
   width: max-content;
   max-width: min(320px, 80vw);
   padding: 8px;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 4px;
-  background: var(--llm-slate1);
-  color: var(--llm-slate12);
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-control);
+  background: var(--bui-surface);
+  color: var(--bui-ink);
   font-size: var(--llm-text-small);
   font-weight: normal;
   line-height: 1.5;
   white-space: normal;
   overflow-wrap: anywhere;
   pointer-events: none;
+  box-shadow: var(--bui-shadow-overlay);
 }
 .llm-annotation-state:hover::after,
 .llm-annotation-state:focus::after,
@@ -9948,10 +10038,14 @@ label.llm-search-results-item:hover {
 }
 .llm-annotation-quote {
   margin: 0;
-  padding: 4px 8px;
+  padding: 8px 10px;
   border-inline-start: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  background: var(--bui-inset);
+  border: 0.5px solid var(--bui-line);
+  border-radius: var(--bui-radius-card);
+  color: var(--bui-ink-2);
 }
 .llm-annotation-question {
   font-weight: 600;
@@ -9969,9 +10063,9 @@ label.llm-search-results-item:hover {
   grid-column: 1 / -1;
 }
 .llm-annotation-image-button {
-  background: var(--llm-ui-surface);
-  border: 0.5px solid var(--llm-ui-border);
-  border-radius: 0;
+  background: var(--bui-inset);
+  border: 0.5px solid var(--bui-line);
+  border-radius: var(--bui-radius-card);
   padding: var(--llm-ui-space-1);
   margin: 0;
   cursor: zoom-in;
@@ -10016,12 +10110,13 @@ label.llm-search-results-item:hover {
 .llm-annotation-source-context > summary {
   cursor: pointer;
   padding: 4px 0;
-  color: var(--llm-ui-muted);
+  color: var(--bui-ink-2);
 }
 .llm-annotation-batch {
   border-top: 0.5px solid var(--llm-ui-border);
   margin-top: 8px;
   padding-top: 8px;
+  border-top-color: var(--bui-line);
 }
 .llm-annotation-answer {
   margin-block: 12px;
@@ -10144,15 +10239,22 @@ label.llm-search-results-item:hover {
   gap: 8px;
   padding: 16px 18px 10px;
   flex: 0 0 auto;
+  background: var(--bui-surface);
 }
 .llm-annotation-view-title {
   margin: 0;
   font-size: var(--llm-text-body);
   font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .llm-annotation-count {
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
+  background: var(--bui-field);
+  padding: 1px 6px;
+  border-radius: var(--bui-radius-chip);
+  font-variant-numeric: tabular-nums;
 }
 .llm-annotation-header-actions {
   display: flex;
@@ -10171,12 +10273,14 @@ label.llm-search-results-item:hover {
   padding: 4px 8px;
   border: none;
   background: transparent;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font: inherit;
   font-size: var(--llm-text-small);
+  border-radius: var(--bui-radius-control);
 }
 .llm-annotation-nav:hover {
-  background: var(--llm-slate3);
+  background: var(--bui-hover);
+  color: var(--bui-ink);
 }
 .llm-annotation-list-view {
   display: flex;
@@ -10194,24 +10298,28 @@ label.llm-search-results-item:hover {
 }
 .llm-annotation-filters {
   display: flex;
-  gap: 20px;
+  gap: 4px;
   padding: 0 22px;
   border-bottom: 0.5px solid var(--llm-slate6);
+  border-bottom-color: var(--bui-line);
 }
 .llm-annotation-drawer .llm-annotation-filter-tab {
   min-height: 42px;
-  padding: 4px 0;
+  padding: 4px 8px;
   border: none;
-  border-bottom: 0.5px solid transparent;
-  background: transparent;
+  border-bottom: 0;
+  background: var(--bui-inset);
   font: inherit;
   font-size: var(--llm-text-small);
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
+  min-width: 0;
+  border-radius: var(--bui-radius-chip);
 }
 .llm-annotation-filter-tab[aria-pressed="true"] {
-  color: var(--llm-slate12);
+  color: var(--bui-accent-ink);
   border-bottom-color: var(--llm-slate12);
   font-weight: 600;
+  background: var(--bui-accent-tint);
 }
 .llm-annotation-list-view > .llm-annotation-toolbar {
   padding: 8px 22px;
@@ -10219,7 +10327,7 @@ label.llm-search-results-item:hover {
 }
 .llm-annotation-chosen {
   margin-inline-end: auto;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
 }
 .llm-annotation-drawer .llm-annotation-row-page {
@@ -10227,11 +10335,12 @@ label.llm-search-results-item:hover {
   justify-self: start;
   min-height: 28px;
   padding: 0 4px;
-  background: transparent;
+  background: var(--bui-inset);
   border: none;
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
   font: inherit;
   font-size: var(--llm-text-small);
+  border-radius: var(--bui-radius-chip);
 }
 .llm-annotation-source-answer {
   white-space: pre-wrap;
@@ -10244,7 +10353,7 @@ label.llm-search-results-item:hover {
 .llm-annotation-identity {
   margin: 12px 0;
   font-size: var(--llm-text-small);
-  color: var(--llm-slate11);
+  color: var(--bui-ink-2);
 }
 .llm-annotation-identity pre {
   white-space: pre-wrap;
@@ -10274,7 +10383,7 @@ label.llm-search-results-item:hover {
   width: 100%;
   max-width: 100%;
   padding: 0;
-  background: var(--llm-slate3);
+  background: var(--bui-inset);
 }
 .llm-annotation-drawer .llm-annotation-image-button img {
   display: block;
@@ -12530,8 +12639,8 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   width: 100%;
   min-width: 0;
   padding: 7px 10px;
-  border-radius: 4px;
-  color: var(--llm-slate12);
+  border-radius: var(--bui-radius-chip);
+  color: var(--bui-ink);
   font: inherit;
   font-size: var(--llm-text-small);
   line-height: 1.25;
@@ -12541,7 +12650,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 
 .llm-paper-chip-cache-menu-item:hover,
 .llm-paper-chip-cache-menu-item:focus-visible {
-  background: var(--llm-slate1);
+  background: var(--bui-hover);
 }
 
 .llm-paper-chip-menu-row .llm-paper-picker-title,
@@ -12553,7 +12662,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 }
 
 .llm-paper-context-card-attachment {
-  color: var(--llm-slate12);
+  color: var(--bui-ink-2);
 }
 
 .llm-paper-chip-disabled-reason {
@@ -12583,10 +12692,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   min-height: 0;
   max-height: var(--llm-paper-picker-max-height, min(82vh, 720px));
   overflow: hidden;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 0;
-  background: var(--llm-slate3);
-  box-shadow: none;
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-card);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-overlay);
   scroll-padding-block: 6px;
 }
 
@@ -13434,10 +13543,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   z-index: 30;
   max-height: min(40vh, 280px);
   overflow-y: auto;
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 0;
-  background: var(--llm-slate3);
-  box-shadow: none;
+  border: 0.5px solid var(--bui-line-strong);
+  border-radius: var(--bui-radius-card);
+  background: var(--bui-surface);
+  box-shadow: var(--bui-shadow-overlay);
 }
 
 .llm-action-picker-list {
@@ -13454,9 +13563,9 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   display: flex;
   align-items: center;
   border: 0.5px solid transparent;
-  border-radius: 0;
+  border-radius: var(--bui-radius-chip);
   background: transparent;
-  color: inherit;
+  color: var(--bui-ink);
   text-align: left;
   font: inherit;
   padding: 5px 8px;
@@ -13468,8 +13577,8 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 }
 
 .llm-action-picker-item:hover:not(:disabled) {
-  background: var(--llm-slate4);
-  border-color: var(--llm-slate8);
+  background: var(--bui-hover);
+  border-color: var(--bui-line);
 }
 
 .llm-action-picker-item:disabled {
@@ -13478,8 +13587,8 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 }
 
 .llm-action-picker-item[aria-selected="true"]:not(:disabled) {
-  background: var(--llm-slate5);
-  border-color: var(--llm-slate7);
+  background: var(--bui-accent-tint);
+  border-color: var(--bui-line);
 }
 
 .llm-action-picker-title {
@@ -13725,10 +13834,10 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
 
 .llm-selected-context-expanded,
 .llm-web-source-popover {
-  border: 0.5px solid var(--llm-slate7);
-  border-radius: 0;
-  background: var(--llm-slate5);
-  box-shadow: none;
+  border: 0.5px solid var(--bui-line-strong, var(--llm-slate7));
+  border-radius: var(--bui-radius-card, 10px);
+  background: var(--bui-surface, var(--llm-slate5));
+  box-shadow: var(--bui-shadow-overlay, none);
 }
 
 .llm-selected-context-expanded {
@@ -14599,7 +14708,7 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   color: var(--llm-status-ready-text);
 }
 .llm-run-status-strip .llm-status-sending {
-  color: var(--llm-status-busy-text);
+  color: var(--bui-accent-ink);
 }
 .llm-run-status-strip .llm-status-warning {
   color: var(--llm-status-warning-text);
@@ -15091,7 +15200,9 @@ details.llm-agent-action-row[open] > summary .llm-agent-action-row-marker {
   gap: 4px;
   font-size: var(--llm-text-small);
   line-height: 1.2;
-  border-radius: 8px;
+  border-radius: var(--bui-radius-control);
+  color: var(--bui-ink-2);
+  background: var(--bui-inset);
 }
 .llm-context-add-slot .llm-upload-file-btn::before {
   width: 16px;
@@ -16960,7 +17071,7 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
   flex: 0 0 100%;
   min-width: 0;
   margin: 3px 2px 0;
-  color: var(--llm-ui-muted);
+  color: var(--bui-ink-2);
   font-size: var(--llm-text-small);
   font-weight: 650;
   letter-spacing: 0.03em;
@@ -16971,7 +17082,7 @@ item-pane-sidenav .llm-persistent-rail-entry[hidden] {
 .llm-context-group-label[data-context-group="add"] {
   margin-top: 5px;
   padding-top: 6px;
-  border-top: 1px solid var(--llm-redesign-border);
+  border-top: 0.5px solid var(--bui-line);
 }
 
 .llm-context-previews[data-scope="empty"] .llm-context-group-label {

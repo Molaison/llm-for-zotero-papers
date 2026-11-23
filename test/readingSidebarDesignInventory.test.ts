@@ -31,6 +31,20 @@ const beautifulUiShadows = new Map([
   [".llm-agent-pending-action-shell", "var(--bui-shadow-card)"],
   [".llm-slash-menu", "var(--bui-shadow-overlay, none)"],
   [".llm-model-menu, .llm-reasoning-menu", "var(--bui-shadow-overlay, none)"],
+  [
+    ".llm-selected-context-expanded, .llm-web-source-popover",
+    "var(--bui-shadow-overlay, none)",
+  ],
+  ...[
+    ".llm-standalone-search-popup",
+    ".llm-history-menu",
+    ".llm-conversation-tools-body",
+    ".llm-answer-more-body",
+    ".llm-action-picker",
+    ".llm-paper-picker",
+    ".llm-source-body",
+    ".llm-annotation-state::after",
+  ].map((selector) => [selector, "var(--bui-shadow-overlay)"] as const),
 ]);
 
 describe("reading sidebar complete bounded style inventory", function () {

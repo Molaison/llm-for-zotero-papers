@@ -183,6 +183,12 @@ export function createHistorySearchPopupController(
   popup.setAttribute("aria-label", translate("Search history"));
   popup.tabIndex = -1;
   const header = createElement(doc, "div", "llm-standalone-search-header");
+  const searchIcon = createElement(
+    doc,
+    "span",
+    "llm-standalone-nav-icon llm-standalone-nav-icon-search",
+  );
+  searchIcon.setAttribute("aria-hidden", "true");
   const input = createElement(doc, "input", "llm-standalone-search-input", {
     type: "text",
     placeholder: translate("Search history"),
@@ -205,7 +211,7 @@ export function createHistorySearchPopupController(
   const results = createElement(doc, "div", "llm-standalone-search-results");
   const disposeHistoryActivity = observeHistoryActivity(results);
 
-  header.append(input, closeButton);
+  header.append(searchIcon, input, closeButton);
   popup.append(header, results);
   overlay.appendChild(popup);
   deps.parent.appendChild(overlay);
@@ -228,22 +234,27 @@ export function createHistorySearchPopupController(
     const popupStyle = win?.getComputedStyle(popup);
     const rootStyle = root ? win?.getComputedStyle(root) : null;
     const bodyStyle = body ? win?.getComputedStyle(body) : null;
+    const standaloneTheme = deps.parent
+      .closest("[data-standalone-theme]")
+      ?.getAttribute("data-standalone-theme");
     const theme =
-      resolveHistorySearchPopupThemeFromColors([
-        popupStyle?.backgroundColor || "",
-        parentStyle?.backgroundColor || "",
-        parentStyle?.getPropertyValue("--material-sidepane") || "",
-        parentStyle?.getPropertyValue("--material-background") || "",
-        rootStyle?.getPropertyValue("--material-sidepane") || "",
-        rootStyle?.getPropertyValue("--material-background") || "",
-        bodyStyle?.backgroundColor || "",
-      ]) ||
-      (deps.parent.closest(".window-is-dark") ||
-      root?.classList.contains("window-is-dark") ||
-      body?.classList.contains("window-is-dark") ||
-      root?.hasAttribute("lwtheme-brighttext")
-        ? "dark"
-        : "light");
+      standaloneTheme === "dark" || standaloneTheme === "light"
+        ? standaloneTheme
+        : resolveHistorySearchPopupThemeFromColors([
+            popupStyle?.backgroundColor || "",
+            parentStyle?.backgroundColor || "",
+            parentStyle?.getPropertyValue("--material-sidepane") || "",
+            parentStyle?.getPropertyValue("--material-background") || "",
+            rootStyle?.getPropertyValue("--material-sidepane") || "",
+            rootStyle?.getPropertyValue("--material-background") || "",
+            bodyStyle?.backgroundColor || "",
+          ]) ||
+          (deps.parent.closest(".window-is-dark") ||
+          root?.classList.contains("window-is-dark") ||
+          body?.classList.contains("window-is-dark") ||
+          root?.hasAttribute("lwtheme-brighttext")
+            ? "dark"
+            : "light");
     overlay.classList.add(
       theme === "dark"
         ? HISTORY_SEARCH_POPUP_THEME_DARK_CLASS

@@ -10,10 +10,11 @@ function chartShell(host: HTMLElement, title: string, doc: Document) {
 
   const heading = doc.createElement("strong");
   heading.textContent = title;
+  heading.className = "llm-cpr-chart-title";
   const controls = doc.createElement("div");
-  controls.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;margin:8px 0";
+  controls.className = "llm-cpr-chart-controls";
   const plot = doc.createElement("div");
-  plot.style.cssText = "width:100%;overflow-x:auto";
+  plot.className = "llm-cpr-chart-plot";
   const status = doc.createElement("div");
   status.setAttribute("aria-live", "polite");
   status.className = "llm-cpr-chart-status";
@@ -31,7 +32,11 @@ function chartShell(host: HTMLElement, title: string, doc: Document) {
     controls.appendChild(element);
     return element;
   };
-  button("数据表", () => { table.hidden = !table.hidden; });
+  const tableToggle = button("数据表", () => {
+    table.hidden = !table.hidden;
+    tableToggle.setAttribute("aria-expanded", String(!table.hidden));
+  });
+  tableToggle.setAttribute("aria-expanded", "false");
   const setDataTable = (columns: string[], rows: string[][]) => {
     const thead = doc.createElement("thead");
     const header = doc.createElement("tr");
