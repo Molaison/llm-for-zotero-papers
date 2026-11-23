@@ -24,10 +24,18 @@ const contentExceptions = new Set([
   "workflowTestHarness.ts",
   "standaloneDocumentWindow.ts",
 ]);
+const beautifulUiShadows = new Map([
+  [".llm-standalone-tab-group", "inset 0 0 0 1px var(--bui-line)"],
+  [".llm-standalone-tab.active", "var(--bui-shadow-card)"],
+  [".llm-compose-area", "var(--bui-shadow-card)"],
+  [".llm-agent-pending-action-shell", "var(--bui-shadow-card)"],
+  [".llm-slash-menu", "var(--bui-shadow-overlay, none)"],
+  [".llm-model-menu, .llm-reasoning-menu", "var(--bui-shadow-overlay, none)"],
+]);
 
 describe("reading sidebar complete bounded style inventory", function () {
   this.timeout(10000);
-  it("uses all 12 Radix steps in both host themes and has no literal colors outside the frozen palette", function () {
+  it("keeps literal colors in the Radix and Beautiful UI theme tokens", function () {
     for (const family of ["slate", "indigo", "red", "green", "amber"])
       for (let step = 1; step <= 12; step++)
         assert.lengthOf(
@@ -41,20 +49,33 @@ describe("reading sidebar complete bounded style inventory", function () {
         );
     assert.include(css, ":root[lwtheme-brighttext]");
     for (const { selector, body } of rules) {
-      for (const line of body.split("\n")) {
-        if (/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i.test(line))
+      for (const declaration of body.split(";").map((line) => line.trim())) {
+        if (!/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(|oklch\(/i.test(declaration))
+          continue;
+        if (
+          selector.includes(
+            ".llm-panel:not(#llmforzotero-standalone-chat-root *)",
+          )
+        ) {
           assert.match(
-            line.trim(),
-            /^--llm-(?:(?:slate|indigo|red|green|amber)\d+|on-solid|primary-hover): #[0-9a-f]{6};$/,
+            declaration,
+            /^--bui-(?:[\w-]+: oklch\([\d. /]+\)|shadow-(?:card|overlay):\s*0 [^;]+)$/,
             selector,
           );
+          continue;
+        }
+        assert.match(
+          declaration,
+          /^--llm-(?:(?:slate|indigo|red|green|amber)\d+|on-solid|primary-hover): #[0-9a-f]{6}$/,
+          selector,
+        );
       }
     }
     assert.notMatch(css, /var\(--(?:fill-|color-|material-|stroke-)/);
     assert.include(css, "--llm-on-solid: #fcfcfd;");
     assert.include(css, "--llm-primary-hover: #3358d4;");
   });
-  it("limits chrome type to the host-scaled 12/14/16 system, removes shadows, and bounds functional motion", function () {
+  it("keeps host-scaled chrome type and bounds elevation and functional motion", function () {
     assert.include(
       css,
       "--llm-text-small: max(12px, calc(0.75rem * var(--llm-font-scale, 1)))",
@@ -83,8 +104,11 @@ describe("reading sidebar complete bounded style inventory", function () {
       }
       for (const m of body.matchAll(
         /(?:^|[;\n])\s*(?:box-shadow|--llm-[\w-]*shadow):\s*([^;]+);/g,
-      ))
+      )) {
+        if (m[1] === beautifulUiShadows.get(selector.replace(/\s+/g, " ")))
+          continue;
         assert.match(m[1], /^none(?: !important)?$/, selector);
+      }
       for (const m of body.matchAll(
         /(?:^|[;\n])\s*(animation|transition):\s*([^;]+);/g,
       )) {
@@ -92,6 +116,12 @@ describe("reading sidebar complete bounded style inventory", function () {
           selector === ".llm-history-activity" &&
           m[1] === "animation" &&
           m[2] === "llm-plan-progress-spin 1s linear infinite"
+        )
+          continue;
+        if (
+          selector === ".llm-bui-drive-pixel" &&
+          m[1] === "animation" &&
+          m[2] === "llm-bui-pixel-on 650ms ease-in-out infinite"
         )
           continue;
         assert.match(
@@ -113,6 +143,10 @@ describe("reading sidebar complete bounded style inventory", function () {
         selector,
       );
     }
+    assert.match(
+      css,
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.llm-bui-drive-pixel\s*\{\s*animation: none;/,
+    );
   });
   it("covers JS chrome literals and authored separators without rewriting scientific/model/user content", function () {
     for (const path of files("src/modules/contextPanel")) {

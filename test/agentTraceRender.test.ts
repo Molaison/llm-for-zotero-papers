@@ -1437,7 +1437,7 @@ describe("agentTrace render", function () {
   it("disables continuous decorative progress animation", function () {
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
     const relevantSelector =
-      /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-typing-dot|llm-task-progress-ring|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
+      /(?:llm-at-(?:row-)?planning|llm-text-shimmer|llm-task-progress-ring|llm-plan-task-badge-in_progress|llm-compact-marker-pending)/;
     const infiniteRules = Array.from(
       css.matchAll(/animation:[^;]*\binfinite\b[^;]*;/g),
     ).flatMap((match) => {
@@ -2033,7 +2033,7 @@ describe("agentTrace render", function () {
         .findByClass("llm-agent-activity-label")!
         .classList.contains("llm-text-shimmer"),
     );
-    assert.lengthOf(summary.findAllByClass("llm-at-planning-drive-pixel"), 0);
+    assert.lengthOf(summary.findAllByClass("llm-bui-drive-pixel"), 0);
 
     message.streaming = false;
     const completed = renderAgentTrace({
@@ -2049,7 +2049,10 @@ describe("agentTrace render", function () {
     assert.isFalse(summary.classList.contains("llm-text-shimmer"));
     assert.match(summary.textContent, /^Worked for /);
     const css = readFileSync("addon/content/zoteroPane.css", "utf8");
-    assert.match(css, /\.llm-text-shimmer\s*\{[^}]*color: var\(--llm-slate11\);[^}]*animation: none/);
+    assert.match(
+      css,
+      /\.llm-text-shimmer\s*\{[^}]*color: var\(--llm-slate11\);[^}]*animation: none/,
+    );
     assert.match(
       css,
       /prefers-reduced-motion: reduce[\s\S]*\.llm-text-shimmer/,
@@ -2161,7 +2164,7 @@ describe("agentTrace render", function () {
     assert.isTrue(
       planningRow?.children[0]?.classList.contains("llm-at-planning-drive"),
     );
-    assert.lengthOf(planning.findAllByClass("llm-at-planning-drive-pixel"), 9);
+    assert.lengthOf(planning.findAllByClass("llm-bui-drive-pixel"), 9);
 
     const streamingRerender = renderAgentTrace({
       doc: fakeDocument,
@@ -2175,10 +2178,7 @@ describe("agentTrace render", function () {
     assert.isFalse(
       rerenderedPlanningRow.children[1].classList.contains("llm-text-shimmer"),
     );
-    assert.lengthOf(
-      streamingRerender.findAllByClass("llm-at-planning-drive-pixel"),
-      9,
-    );
+    assert.lengthOf(streamingRerender.findAllByClass("llm-bui-drive-pixel"), 9);
     assert.isTrue(
       streamingRerender
         .findByClass("llm-agent-activity-label")!

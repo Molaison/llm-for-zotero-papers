@@ -219,7 +219,10 @@ describe("reading sidebar design system", function () {
       css,
       /\.llm-actions\s*\{[^}]*grid-template-columns: auto minmax\(0, 1fr\) auto;/,
     );
-    assert.match(css, /\.llm-compose-area\s*\{[^}]*border-radius: 20px/);
+    assert.match(
+      css,
+      /\.llm-compose-area\s*\{[^}]*border-radius: var\(--bui-radius-window\)/,
+    );
     assert.match(
       css,
       /\.llm-input\s*\{[^}]*appearance: none;[^}]*border: none;/,
@@ -227,7 +230,10 @@ describe("reading sidebar design system", function () {
     const primary = /\.llm-action-btn-primary\s*\{([^}]+)\}/.exec(css)![1];
     assert.include(primary, "background: var(--llm-slate12)");
     const bubble = /\.llm-bubble\.user\s*\{([^}]+)\}/.exec(css)![1];
-    assert.include(bubble, "background: var(--llm-slate3)");
+    assert.include(
+      bubble,
+      "background: color-mix(in srgb, var(--bui-field) 94%, var(--bui-ink))",
+    );
     assert.notInclude(css, ".llm-model-btn.llm-model-btn-collapsed::after");
   });
   it("owns dark input hints and header mask ink without requiring a native dark control theme", function () {
@@ -248,12 +254,13 @@ describe("reading sidebar design system", function () {
       ".llm-history-menu-search-input",
     ]) {
       const hint = body(selector + "::placeholder");
-      assert.include(hint, "color: var(--llm-slate11) !important");
+      const ink = selector === ".llm-input" ? "--bui-ink-2" : "--llm-slate11";
+      assert.include(hint, `color: var(${ink}) !important`);
       assert.include(hint, "opacity: 1");
     }
     assert.match(
       css,
-      /\.llm-input\s*\{[^}]*color: var\(--llm-ui-ink\);[^}]*caret-color: var\(--llm-ui-ink\);/,
+      /\.llm-input\s*\{[^}]*color: var\(--bui-ink\);[^}]*caret-color: var\(--bui-accent-ink\);/,
     );
     assert.include(body(".llm-action-btn-primary"), "color: var(--llm-slate1)");
   });

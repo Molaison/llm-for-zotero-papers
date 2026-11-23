@@ -72,7 +72,7 @@
   gap: 1.5px;
 }
 
-.llm-bui-drive > span {
+.llm-bui-drive-pixel {
   width: 4px;
   height: 4px;
   border-radius: 1px;
@@ -80,8 +80,21 @@
   opacity: 0.15;
   animation: llm-bui-pixel-on 650ms ease-in-out infinite;
   animation-delay: calc(
-    var(--llm-stable-animation-delay, 0ms) + var(--llm-bui-pixel-delay)
+    var(--llm-stable-animation-delay, 0ms) + var(--llm-bui-pixel-delay, 0ms)
   );
+}
+
+/* The columns of the Drive chevron advance in 90 ms steps. */
+.llm-bui-drive-pixel:is(:nth-child(1), :nth-child(5), :nth-child(7)) {
+  --llm-bui-pixel-delay: 90ms;
+}
+
+.llm-bui-drive-pixel:is(:nth-child(2), :nth-child(6), :nth-child(8)) {
+  --llm-bui-pixel-delay: 180ms;
+}
+
+.llm-bui-drive-pixel:is(:nth-child(3), :nth-child(9)) {
+  --llm-bui-pixel-delay: 270ms;
 }
 
 @keyframes llm-bui-pixel-on {
@@ -97,7 +110,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .llm-bui-drive > span {
+  .llm-bui-drive-pixel {
     animation: none;
     opacity: 0.55;
   }
