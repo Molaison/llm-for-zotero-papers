@@ -69,6 +69,7 @@ import {
 import { buildAssistantDisplayMarkdownForRender } from "../assistantRichText";
 import { renderRenderedMarkdownInto } from "../renderedMarkdown";
 import { applyStableAnimationPhase } from "../stableAnimationPhase";
+import { createBeautifulUiDrive } from "../beautifulUiDrive";
 import { isCodexPlanChecklistEvent } from "../taskProgress/codexPlan";
 import { PLAN_STATUS_SYMBOLS } from "../taskProgress/planSteps";
 import { openStandalonePlanDocumentWindow } from "../standalonePlanDocumentWindow";
@@ -5945,18 +5946,6 @@ function renderAgentTraceDetailsBody(
 
 export const renderAgentTraceDetailsBodyForTests = renderAgentTraceDetailsBody;
 
-function createPlanningDriveIcon(doc: Document): HTMLSpanElement {
-  const loader = doc.createElement("span") as HTMLSpanElement;
-  loader.className = "llm-at-planning-drive";
-  loader.setAttribute("aria-hidden", "true");
-  for (let index = 0; index < 9; index += 1) {
-    const pixel = doc.createElement("span") as HTMLSpanElement;
-    pixel.className = "llm-at-planning-drive-pixel";
-    loader.appendChild(pixel);
-  }
-  return loader;
-}
-
 const cardDisposers = new WeakMap<HTMLElement, () => void>();
 function disposePlanCard(node: HTMLElement): void {
   cardDisposers.get(node)?.();
@@ -7010,9 +6999,11 @@ export function renderAgentTrace({
         row.classList.add("llm-at-row-planning-active");
       }
       const icon = isActivePlanningRow
-        ? createPlanningDriveIcon(doc)
+        ? createBeautifulUiDrive(doc)
         : doc.createElement("span");
-      if (!isActivePlanningRow) {
+      if (isActivePlanningRow) {
+        icon.classList.add("llm-at-planning-drive");
+      } else {
         icon.className = `llm-at-icon${
           itemEntry.row.iconName ? ` llm-at-icon-${itemEntry.row.iconName}` : ""
         }`;

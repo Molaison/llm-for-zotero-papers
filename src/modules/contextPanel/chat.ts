@@ -392,6 +392,7 @@ import {
   validateLoadedConversationQuoteMessages,
 } from "./quoteValidation/scheduling";
 import { applyStableAnimationPhase } from "./stableAnimationPhase";
+import { createBeautifulUiDrive } from "./beautifulUiDrive";
 import { stripReceiptStatusForDisplay } from "../../agent/contracts/actionEvaluation";
 import { renderRenderedMarkdownInto } from "./renderedMarkdown";
 import { disposeStreamingMarkdown } from "./streamingMarkdown";
@@ -11862,8 +11863,11 @@ export function refreshChat(
       ) {
         const typing = doc.createElement("div") as HTMLDivElement;
         typing.className = "llm-typing";
-        typing.innerHTML =
-          '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
+        typing.setAttribute("role", "status");
+        const label = doc.createElement("span");
+        label.className = "llm-typing-text";
+        label.textContent = t("Thinking…");
+        typing.append(createBeautifulUiDrive(doc), label);
         bubble.appendChild(typing);
       }
 

@@ -11,6 +11,7 @@ import {
 } from "../../actionStatusText";
 import { renderPendingActionCard } from "../../agentTrace/render";
 import { createDocumentCardLayout } from "../../documentCard";
+import { createBeautifulUiDrive } from "../../beautifulUiDrive";
 
 const PAGED_REVIEW_TRANSITION_ACTION_IDS = new Set([
   "next",
@@ -157,8 +158,7 @@ export function renderActionTransitionCard(
   const typing = doc.createElement("div");
   typing.className = "llm-typing llm-agent-hitl-transition-typing";
   typing.setAttribute("aria-hidden", "true");
-  typing.innerHTML =
-    '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
+  typing.appendChild(createBeautifulUiDrive(doc));
   content.appendChild(typing);
 
   return card;
